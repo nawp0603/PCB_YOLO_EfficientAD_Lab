@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools==80.10.2"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pcb-lab"
+version = "0.1.0"
+description = "Read-only canonical PCB dataset audit and development EDA"
+requires-python = ">=3.11"
+dependencies = ["Pillow==12.1.1", "PyYAML==6.0.3"]
+
+[tool.setuptools.packages.find]
+where = ["src"]

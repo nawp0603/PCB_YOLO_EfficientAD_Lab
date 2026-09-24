@@ -1,0 +1,10 @@
+reports/overlays/
+.venv/
+.cache/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+reports/repeat/
+reports/verification/

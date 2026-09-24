@@ -1,0 +1,6 @@
+DATASET_ROOT: 'D:\FPTU\KLTN\DatasetVer4_Public'
+manifest: benchmarks/deeppcb/manifests/samples.jsonl
+holdout: benchmarks/deeppcb/splits/holdout.json
+classes: benchmarks/deeppcb/configs/classes.json
+protocol: benchmarks/deeppcb/configs/protocol.json
+release: benchmarks/deeppcb/release.json
