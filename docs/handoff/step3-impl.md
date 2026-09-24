@@ -89,3 +89,70 @@ Môi trường phát triển CPU local tại worktree, cài mới vào `.venv` r
 
 - Đề xuất (a) recipe hình học, (b) lr0=0.001/batch=16, (c) infer{} — **đã được người dùng duyệt** qua AskUserQuestion.
 - **DỪNG chờ người dùng duyệt trước khi chạy train thật trên GPU.** Phase 0 chỉ thiết lập môi trường + xác nhận default + ghi handoff này.
+
+---
+
+## Phase 1
+
+### File đã tạo (đã commit sớm, xem git log)
+
+- `src/pcb_lab/models/__init__.py`, `src/pcb_lab/models/yolo/{__init__,view,train,adapter,extract}.py`.
+- `configs/models/yolo_common.yaml` (chỉ comment, parse thành mapping rỗng), `yolo11n.yaml`, `yolo11s.yaml`.
+- `scripts/train_yolo.py`, `scripts/extract_yolo_predictions.py`.
+- `requirements/step3.txt` (torch 2.14.0+cpu, ultralytics 8.4.161, các dep Step 2 khóa phiên bản, kèm lệnh cài `--index-url https://download.pytorch.org/whl/cpu`).
+- `docs/RUN_GPU.md` (CUDA local + Colab/Kaggle: đặt DATASET_ROOT, cài requirements, tải pretrained, mang artifact về local).
+
+### Cơ chế đã hiện thực (theo hợp đồng step3-contract.md)
+
+**view.py — `build_yolo_view`**
+- Chỉ chấp nhận `train` + `calibration`; `fusion`/`test` → `ViewError(PermissionError)` (`_reject_forbidden`).
+- Ghi hardlink ảnh (fallback copy nếu cross-device) + label YOLO `class cx cy w h` (6 decimals) + `data.yaml` **chỉ có `train`/`val`/`names`, không có `test`** (assert cứng).
+- Không bao giờ ghi vào DATASET_ROOT: dùng `output_path()` guard + `cache=False` trong runner; `view_manifest.txt` + `view_signature` (sha256 trên `sample_id\timage_sha256\tlabel_sha256` đã sort) để rebuild idempotent.
+- `limit={'good':n,'defect':n}` tuỳ chọn; nếu `None` giữ nguyên toàn bộ (train 1792 / calibration 460).
+
+**train.py — `train_yolo`**
+- Merge `yolo_common.yaml` + model config; từ chối key không thuộc `ALLOWED_CONFIG_KEYS` (`ConfigError`).
+- `_check_nulls` từ chối `lr0/batch/workers/augment` null → runner không chạy với hyperparam thiếu.
+- Override ép **toàn bộ** photometric/mosaic = 0.0 (`hsv_*`, `degrees`, `translate`, `scale`, `shear`, `perspective`, `flipud`, `fliplr=0.5`, `mosaic`, `mixup`, `copy_paste`, `bgr`, `close_mosaic`); `amp=False` (CPU), `cos_lr`/`warmup_epochs` từ config.
+- Recipe `yolo_aug_v1` = hình học thuần, áp **online** qua `_AugmentedYOLODataset.get_image_and_label`: xoay 90°×k (seed per `(aug_seed,epoch,index)`) + lật ngang p=0.5, áp lên cả ảnh BGR và box xywh chuẩn hóa (`_geometric_augment`). **View không bị mở rộng** → giữ invariant #1 (1792/460).
+- Quản lý pretrained: `ConfigError` nếu thiếu và `allow_download=False`; nếu `allow_download=True` ghi source. Smoke dùng `arch` + `limit=8/8`, `epochs=1`, không tạo artifact.
+- `chdir` vào `runs/...` trước khi gọi train (ngăn ghi `labels.cache` vào DATASET_ROOT). Đo peak RAM (psutil / win32 psapi), VRAM = null trên CPU (`method` ghi rõ, không fake).
+- Xuất `run_manifest.json`, `env.json`, copy `best/last.pt` → `artifacts/yolo/<model_id>/seed<seed>`, `calibration_per_class.json`, `artifact.json` (có sha checkpoint + class_order + config_hash + view_signature), `model_card.md` (tiếng Việt, ASCII-safe), `_link_preds`.
+
+**adapter.py — `YoloDetector` / `UltralyticsEngine`**
+- `UltralyticsEngine.infer` nhận **RGB uint8 HWC** (canonical Step 2), chuyển `bgr = arr[..., ::-1]` rồi `model.predict(...)` — khớp đường truyền path (cv2.imread=BGR). Trả `[N,6]` xyxy/conf/cls trong không gian letterboxed 640.
+- `YoloDetector.predict` dùng **duy nhất** `prepare_input(image,"yolo")` + `LetterboxMeta` + `unletterbox_boxes` (tái dùng Step 2) → trả list `Detection` đã sort theo confidence giảm dần; `image_score` = max conf hoặc 0.0.
+- `from_artifact` kiểm: `artifact.json` + `best.pt` tồn tại, sha checkpoint khớp (`ArtifactMismatchError`), class order khớp `classes.json` (`ClassOrderError`), artifact smoke bị từ chối trừ khi `allow_smoke=True` (`SmokeArtifactError`).
+
+**extract.py — `extract_predictions`**
+- Chỉ `calibration`/`fusion`; `test`/khác → `PermissionError`.
+- Đọc sample qua `ManifestDataset`, chạy adapter, ghi `preds_<partition>.jsonl` (1 dòng/ảnh, sort theo `sample_id`, deterministic, ghi sha256 file).
+- Lỗi inference ghi vào `error_reason`, **không** drop/đổi thành GOOD/0; confidence ≥ `conf_floor`.
+
+### Kiểm chứng tĩnh / mức module (đã chạy, PASS — chưa cần checkpoint/train)
+
+1. **Compile:** `py_compile` toàn bộ `src/pcb_lab/models/yolo/*.py` + `scripts/*.py` → OK.
+2. **Import symbols:** `import pcb_lab.models.yolo` + `_PCBDetectionTrainer`, `_AugmentedYOLODataset`, `_geometric_augment`, `_merge_configs`, `_config_hash`, `_check_nulls`, `ViewError`, `ConfigError`, `YoloDetector`, `extract_predictions` → OK (sửa lỗi thiếu `from dataclasses import dataclass, field` và `from ultralytics import YOLO`).
+3. **`_merge_configs`** trên `yolo_common.yaml`(comment-only) + `yolo11n.yaml` → merge đúng, keys `{architecture,classes_ref,infer,model_id,pretrained,recipe_id,selection,train}`; `_check_nulls` PASS trên config hợp lệ, raise `ConfigError` khi `lr0=None`.
+4. **`_geometric_augment`** (k=1,flip=True) trên ảnh 4×4 + box → ảnh xoay/lật, box `[[0.25,0.25,0.5,0.5]]` → `[[0.75,3.75,0.5,0.5]]` (đúng công thức flip ngang: cx'=1-cx; xoay 90° cw: (cx,cy)→(1-cy,cx), w↔h).
+5. **Build view thật trên DATASET_ROOT** (`D:\FPTU\KLTN\DatasetVer4_Public`): `train=1792 (good 895/defect 897)`, `calibration=460 (good 230/defect 230)`; box_counts mỗi lớp hợp lý (open_circuit, short, mouse_bite, spur, spurious_copper, pin_hole); `data.yaml` **không có `test`**; `view_signature` sinh đúng. `limit={'good':2,'defect':2}` → 4/4 ảnh.
+6. **Gating partition:** view từ chối `fusion`/`test`; extract từ chối `test`/`train`/`fusion+test` → `PermissionError`.
+7. **DATASET_ROOT untouched:** sau build view, `ls` dataset chỉ ra các thư mục gốc (audit/benchmarks/...); không có file cache mới.
+8. **Adapter wiring (không cần ckpt):** `prepare_input(path,"yolo")` trên ảnh defect thật trả meta có `scale/pad_left/pad_top/orig_w/orig_h` + `LetterboxMeta(...)` + `unletterbox_boxes` roundtrip → OK.
+
+### Kiểm chứng còn lại (thuộc Phase 2 — cần checkpoint + train)
+
+- Smoke train CPU 1 epoch (real data, limit 8/8) → `runs/smoke/...`, `run_manifest.json`, **không** artifact chính thức.
+- Reload qua `YoloDetector.from_artifact(..., allow_smoke=True)`; chứng minh **equivalence**: `predict(RGB_array)` ≈ `predict(image_path)` (cùng box, conf) — khóa chứng minh kênh màu đúng.
+- Extract predictions trên vài ảnh calibration qua adapter.
+- Build full view + check invariant (image counts, total boxes/class vs PLAN §1.3, no fusion/test, hash).
+
+### Ghi chú kỹ thuật
+
+- `resolve_classes_root`/`load_canonical_names` trong adapter phân giải dataset root từ `configs/dataset.yaml`/env, không hardcode.
+- `view.data_yaml` gán `val: images/calibration` (không phải `test`) — khớp hợp đồng `selection.split=calibration`.
+- `config_hash` loại trừ `seed` (CLI-only) nên tái lập được từ config.
+
+### Trạng thái duyệt
+
+- Phase 1 hoàn thành mức code + kiểm chứng tĩnh. **DỪNG chờ duyệt Phase 2 (smoke end-to-end)** trước khi chạy train.
