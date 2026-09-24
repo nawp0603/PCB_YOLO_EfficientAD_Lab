@@ -76,6 +76,21 @@ def _check_nulls(cfg: dict) -> None:
             raise ConfigError(f"train.{key} is null; the trainer refuses to run until it is set")
 
 
+def _resolve_amp(amp, device):
+    # AMP is only meaningful and safe on a CUDA device; on CPU it adds overhead with
+    # no benefit, so it is forced off there regardless of the explicit flag.
+    if amp is not None:
+        return bool(amp)
+    dev = (device or "cpu")
+    if str(dev).lower() in ("cpu", "none", ""):
+        return False
+    try:
+        import torch
+        return torch.cuda.is_available()
+    except Exception:
+        return False
+
+
 def _geometric_augment(img_bgr, bboxes_norm_xywh, k, flip):
     """Apply dihedral (k*90ccw + optional fliplr) to BGR image + normalized xywh boxes.
 
@@ -282,7 +297,7 @@ def _download_pretrained(rel):
 
 
 def train_yolo(config_path, seed=42, out_root=".", device=None, smoke=False,
-               resume=False, allow_download=False):
+               resume=False, allow_download=False, amp=None):
     os.environ.setdefault("ULTRALYTICS_NO_ANALYTICS", "1")
     config_path = Path(config_path)
     if not config_path.exists():
@@ -361,7 +376,7 @@ def train_yolo(config_path, seed=42, out_root=".", device=None, smoke=False,
         "exist_ok": True,
         "cache": train_cfg.get("cache", False),
         "plots": train_cfg.get("plots", True),
-        "amp": False,
+        "amp": _resolve_amp(amp, device),
         "conf": infer_cfg["conf_floor"],
         "iou": infer_cfg["iou"],
         "max_det": infer_cfg["max_det"],

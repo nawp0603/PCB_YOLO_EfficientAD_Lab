@@ -28,6 +28,8 @@ def main() -> int:
     ap.add_argument("--smoke", action="store_true", help="Smoke run: random init, 1 epoch, small view, no artifacts")
     ap.add_argument("--resume", action="store_true", help="Resume an existing run dir")
     ap.add_argument("--allow-download", action="store_true", help="Fetch pretrained weights if missing")
+    ap.add_argument("--amp", default=None, choices=("true", "false"),
+                   help="Force AMP on/off; default: auto-enable on CUDA GPU, off on CPU")
     args = ap.parse_args()
 
     try:
@@ -35,6 +37,7 @@ def main() -> int:
             config_path=args.config, seed=args.seed, out_root=args.out_root,
             device=args.device, smoke=args.smoke, resume=args.resume,
             allow_download=args.allow_download,
+            amp=(args.amp == "true") if args.amp is not None else None,
         )
     except Exception as exc:
         print(f"TRAIN FAILED: {type(exc).__name__}: {exc}", file=sys.stderr)

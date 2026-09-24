@@ -193,3 +193,37 @@ Tất cả sửa trên đã commit (`a06bc9a`).
 ### Trạng thái duyệt
 
 - **Phase 2 PASS** trên CPU: smoke train OK, adapter equivalence OK, extract OK, full-view invariants OK. Không merge, chờ điều phối viên review rồi chuyển sang train GPU thật (Bước 0/Gate 0).
+
+---
+
+## Gói thực thi Colab (Gate 0 & Full Training 100 epochs)
+
+### Thành phần đã tạo
+
+- `notebooks/train_yolo_colab.ipynb` — notebook "run-all" (Runtime ▸ Run all) 8 cell:
+  1. **Gate 0 Hardware**: `!nvidia-smi` + `torch.cuda.is_available()`, in tên GPU + CUDA capability, assert compute capability >= 7.0.
+  2. **Dataset Setup**: mount Drive, gán `os.environ["DATASET_ROOT"]`, assert manifest `samples.jsonl` tồn tại.
+  3. **Install**: cài từ `requirements/step3.txt` **nhưng bỏ qua torch/torchvision** (giữ CUDA build của Colab), rồi `pip install --no-build-isolation --no-deps -e .`.
+  4. **Pretrained**: tạo `artifacts/pretrained/`, tải `yolo11n.pt` + `yolo11s.pt` từ Ultralytics release `v8.3.0`.
+  5. **Train B01 YOLO11n**: 100 epoch, seed 42, AdamW, `--device 0`, AMP auto-on GPU.
+  6. **Train B02 YOLO11s**: tương tự.
+  7. **Extract**: `calibration` + `fusion` cho cả 2 model (tập `test` bị chặn trong code).
+  8. **Export**: nén `artifacts/yolo/` -> `yolo_step3_artifacts.zip`, `files.download()`.
+- `scripts/package_colab.py` — đóng gói mã nguồn thành `exports/colab_bundle.zip` (61 files, ~177 KB), loại `.venv/ runs/ .cache/ artifacts/ *.pt *.zip` và dataset.
+
+### AMP (thay đổi interface)
+
+- `train_yolo` và CLI `--amp` mới: **mặc định auto** bật trên CUDA GPU, tắt trên CPU; có thể ép bằng `--amp true|false`. Trước đây hardcode `amp=False`. Cloud GPU (Cell 5/6) sẽ ghi `amp=True` vào `run_manifest.json`.
+
+### Cách đưa lên Colab
+
+```powershell
+# 1) Dong goi (local)
+python scripts/package_colab.py                 # -> exports/colab_bundle.zip
+# 2) Tai colab_bundle.zip len Google Drive hoac GitHub
+# 3) Mo Colab, upload giai nen, chay notebook/train_yolo_colab.ipynb (Runtime -> Run all)
+# 4) O Cell 2 sua DATASET_ROOT neu DatasetVer4_Public o duong dan khac tren Drive
+# 5) Sau Cell 8, tai yolo_step3_artifacts.zip ve local, giai nen vao artifacts/yolo/
+```
+
+Ghi chu: không commit file `.pt` hay `.zip` lón vao Git (`.gitignore` dã lo). `exports/colab_bundle.zip` cung nam trong ignore (không commit).
