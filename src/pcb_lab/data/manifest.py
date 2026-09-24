@@ -71,6 +71,14 @@ def sha256_file(path: Path) -> str:
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
+def artifact_path(out_dir: Path, relative: str) -> Path:
+    """Reject existing output symlinks/junctions leading outside out_dir."""
+    path = (out_dir / relative).resolve()
+    if not path.is_relative_to(out_dir.resolve()):
+        raise DatasetInputError(f"Output path escapes report directory: {relative}")
+    return path
+
+
 def read_json(path: Path) -> dict:
     try:
         value = json.loads(path.read_text(encoding="utf-8-sig"))
