@@ -115,11 +115,14 @@ class YoloDetector:
         root = resolve_classes_root(meta)
         names = load_canonical_names(root)
         model = YOLO(str(best))
-        model_names = list(getattr(model.model, "names", []) or [])
-        if [names[i] for i in range(len(names))] != [n for n in model_names[:len(names)]]:
-            # Compare by index order, not length, to tolerate extra heads.
-            if model_names[:len(names)] != names:
-                raise ClassOrderError(f"Model class order {model_names} != classes.json {names}")
+        raw = getattr(model.model, "names", []) or getattr(model, "names", []) or []
+        # names may be a {idx: name} dict or a list; normalize to a list by index.
+        if isinstance(raw, dict):
+            model_names = [raw[i] for i in sorted(raw)]
+        else:
+            model_names = list(raw)
+        if model_names[:len(names)] != names:
+            raise ClassOrderError(f"Model class order {model_names} != classes.json {names}")
         infer_params = dict(meta["inference_params"])
         engine = UltralyticsEngine(model, infer_params, names, device=meta.get("device", "cpu"))
         detector_meta = {

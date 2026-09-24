@@ -77,31 +77,25 @@ def _check_nulls(cfg: dict) -> None:
 
 
 def _geometric_augment(img_bgr, bboxes_norm_xywh, k, flip):
-    """Apply dihedral (k*90ccw + optional fliplr) to BGR image and normalized xywh boxes.
+    """Apply dihedral (k*90ccw + optional fliplr) to BGR image + normalized xywh boxes.
 
-    Mirrors pcb_lab.data.augment exactly (pixel-space rotation, then renormalize).
+    Operates directly in normalized xywh space (the boxes are already normalized to
+    the image's own W/H, so rotation is a rigid permutation of normalized coords:
+    90 deg CCW sends (cx, cy, bw, bh) -> (cy, 1 - cx, bh, bw)). Mirrors
+    pcb_lab.data.augment.apply_augmentation exactly (Step 2 approved recipe).
     Returns (img_bgr, bboxes_norm_xywh) with the same column layout.
     """
-    h, w = img_bgr.shape[:2]
-    if k:
-        img_bgr = np.ascontiguousarray(np.rot90(img_bgr, k=k, axes=(0, 1)))
-        hh, ww = img_bgr.shape[:2]
-        boxes_out = []
-        for (cx, cy, bw, bh) in (bboxes_norm_xywh if len(bboxes_norm_xywh) else np.empty((0, 4))):
-            x1, y1, x2, y2 = cx - bw / 2, cy - bh / 2, cx + bw / 2, cy + bh / 2
-            for _ in range(k):
-                x1, y1, x2, y2 = y1, (w - x2), y2, (w - x1)
-                w, h = h, w
-            boxes_out.append([(x1 + x2) / 2, (y1 + y2) / 2, abs(x2 - x1), abs(y2 - y1)])
-        bboxes_norm_xywh = np.array(boxes_out, dtype=np.float64) if boxes_out else np.empty((0, 4))
-        w, h = ww, hh
-    if flip:
-        img_bgr = img_bgr[:, ::-1, :].copy()
-        boxes_out = []
-        for (cx, cy, bw, bh) in (bboxes_norm_xywh if len(bboxes_norm_xywh) else np.empty((0, 4))):
-            boxes_out.append([1.0 - cx, cy, bw, bh])
-        bboxes_norm_xywh = np.array(boxes_out, dtype=np.float64) if boxes_out else np.empty((0, 4))
-    return img_bgr, bboxes_norm_xywh
+    for _ in range(k):
+        img_bgr = np.ascontiguousarray(np.rot90(img_bgr, k=1, axes=(0, 1)))
+    boxes = []
+    for (cx, cy, bw, bh) in (bboxes_norm_xywh if len(bboxes_norm_xywh) else np.empty((0, 4))):
+        for _ in range(k):
+            cx, cy, bw, bh = cy, 1.0 - cx, bh, bw  # 90 deg CCW in normalized space
+        if flip:
+            cx = 1.0 - cx
+        boxes.append([cx, cy, bw, bh])
+    out = np.array(boxes, dtype=np.float64) if boxes else np.empty((0, 4), dtype=np.float64)
+    return img_bgr, out
 
 
 class _AugmentedYOLODataset(YOLODataset):
@@ -126,16 +120,17 @@ class _AugmentedYOLODataset(YOLODataset):
         k = int(rng.integers(0, 4))
         flip = bool(rng.random() < 0.5)
         img = label["img"]  # BGR uint8 HWC
-        bboxes = label["bboxes"]  # normalized xywh, (n,4)
+        instances = label["instances"]  # Instances: normalized xywh boxes
+        bboxes = instances._bboxes.bboxes  # (n,4) normalized xywh
         if bboxes.size:
             img, bboxes = _geometric_augment(img, np.asarray(bboxes, dtype=np.float64), k, flip)
+            instances.update(bboxes.astype(np.float32))
         else:
             if k:
                 img = np.ascontiguousarray(np.rot90(img, k=k, axes=(0, 1)))
             if flip:
                 img = img[:, ::-1, :].copy()
         label["img"] = img
-        label["bboxes"] = bboxes
         return label
 
     def _set_epoch(self, epoch):
@@ -172,7 +167,7 @@ class _PCBDetectionTrainer(DetectionTrainer):
     def _make_yolo_dataset(self, dataset_cls, img_path, batch, mode, rect, stride):
         pad = 0.0 if mode == "train" else 0.5
         rect = bool(self.args.rect or rect)
-        fraction = None
+        fraction = 1.0
         augment = mode == "train"
         kwargs = dict(
             img_path=img_path, imgsz=self.args.imgsz, batch_size=batch,
@@ -341,8 +336,15 @@ def train_yolo(config_path, seed=42, out_root=".", device=None, smoke=False,
     view = build_yolo_view(dataset_root, view_out, partitions=("train", "calibration"),
                            link="hardlink", limit=limit)
 
+    # Smoke = random init from architecture config (no pretrained, no download);
+    # real run = pretrained checkpoint. A bare arch name would route to .pt and
+    # trigger a download, so smoke uses the "<arch>.yaml" config path.
+    if smoke:
+        model_arg = f"{arch}.yaml"
+    else:
+        model_arg = str(pretrained_path) if pretrained_path else arch
     overrides = {
-        "model": (str(pretrained_path) if (not smoke and pretrained_path) else arch),
+        "model": model_arg,
         "data": str(view.data_yaml),
         "imgsz": train_cfg["imgsz"],
         "epochs": (1 if smoke else train_cfg["epochs"]),
@@ -354,7 +356,7 @@ def train_yolo(config_path, seed=42, out_root=".", device=None, smoke=False,
         "deterministic": train_cfg.get("deterministic", True),
         "seed": seed,
         "device": (device or "cpu"),
-        "project": str(runs_base.parent.parent),
+        "project": str(runs_base.parent),
         "name": runs_base.name,
         "exist_ok": True,
         "cache": train_cfg.get("cache", False),
@@ -379,7 +381,7 @@ def train_yolo(config_path, seed=42, out_root=".", device=None, smoke=False,
     prev_cwd = Path.cwd()
     try:
         os.chdir(runs_base)
-        model = YOLO((str(pretrained_path) if (not smoke and pretrained_path) else arch))
+        model = YOLO(model_arg)
         trainer = _PCBDetectionTrainer(overrides=overrides, aug_seed=seed, peak=peak)
         trainer.train()
     finally:
