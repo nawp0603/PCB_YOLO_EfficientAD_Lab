@@ -1,6 +1,6 @@
 # tests/conftest.py
 #
-# Sở hữu: VERIFIER (step1/tests + step2/tests). IMPLEMENTER (step1/impl, step2/impl)
+# Sở hữu: VERIFIER (step1/tests + step2/tests + step3/tests). IMPLEMENTER
 # KHÔNG sửa file này.
 #
 # Mục đích:
@@ -45,9 +45,60 @@ def _real_dataset_root() -> Path | None:
 
 def pytest_configure(config):
     config.addinivalue_line(
+        "markers", "smoke: needs torch+ultralytics; slow, CPU-capable training/reload"
+    )
+    config.addinivalue_line(
+        "markers", "artifacts: needs STEP3_ARTIFACT_DIR pointing to a real artifact"
+    )
+    config.addinivalue_line(
         "markers",
         "dataset: test cần dataset thật; tự skip nếu DATASET_ROOT thiếu hoặc không hợp lệ",
     )
+
+
+def pytest_collection_modifyitems(config, items):
+    # Step 3 contract: absent optional inputs skip; a supplied broken artifact fails.
+    for item in items:
+        if item.get_closest_marker("artifacts") and not os.environ.get("STEP3_ARTIFACT_DIR"):
+            item.add_marker(pytest.mark.skip(reason="STEP3_ARTIFACT_DIR is not set"))
+
+
+@pytest.fixture
+def step3_artifact_dir():
+    value = os.environ.get("STEP3_ARTIFACT_DIR")
+    if not value:
+        pytest.skip("STEP3_ARTIFACT_DIR is not set")
+    path = Path(value).resolve()
+    assert path.is_dir(), f"STEP3_ARTIFACT_DIR does not exist: {path}"
+    assert (path / "artifact.json").is_file(), f"Missing artifact.json: {path}"
+    return path
+
+
+@pytest.fixture
+def step3_cpu_dependencies(tmp_path, monkeypatch):
+    # Step 3 smoke: no GPU requirement; broken installed packages must fail visibly.
+    from importlib.util import find_spec
+    missing = [name for name in ("torch", "ultralytics") if find_spec(name) is None]
+    if missing:
+        pytest.skip("smoke dependencies missing: " + ", ".join(missing))
+    # Keep library import-time settings in the test's own directory.
+    monkeypatch.setenv("YOLO_CONFIG_DIR", str(tmp_path / "ultralytics-settings"))
+    import torch
+    import ultralytics
+    return torch, ultralytics
+
+
+@pytest.fixture(autouse=True)
+def step3_no_network(request, monkeypatch):
+    # Step 3 contract: no implicit downloads. Limit the guard to verifier-owned YOLO tests.
+    if not request.node.path.name.startswith("test_yolo_"):
+        return
+    import socket
+    def deny_network(*args, **kwargs):
+        pytest.fail("Step 3 test attempted network access without allow_download=True")
+    monkeypatch.setattr(socket, "create_connection", deny_network)
+    monkeypatch.setattr(socket.socket, "connect", deny_network)
+    monkeypatch.setattr(socket.socket, "connect_ex", deny_network)
 
 
 @pytest.fixture
