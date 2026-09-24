@@ -12,3 +12,8 @@ runs/
 artifacts/**/*.pt
 artifacts/**/preds_*.jsonl
 data_refs/yolo_view*/
+exports/
+*.zip
+yolo_step3_artifacts.zip
+scratch/
+notebooks/**/*.ipynb_checkpoints/
