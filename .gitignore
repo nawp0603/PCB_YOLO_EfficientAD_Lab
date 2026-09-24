@@ -8,3 +8,7 @@ build/
 dist/
 reports/repeat/
 reports/verification/
+runs/
+artifacts/**/*.pt
+artifacts/**/preds_*.jsonl
+data_refs/yolo_view*/
