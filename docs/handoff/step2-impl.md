@@ -61,8 +61,111 @@
 
 ## Phase 1
 
-Chưa viết code tại thời điểm ghi Phase 0. Augment và ánh xạ pair_id đang chờ phản hồi; tiếp tục được TileManager/preprocessing độc lập.
+Phase 0 đã commit trước code (`2335efe`). Sau đó người dùng duyệt **"Duyệt recipe hình học này"**, chốt **"Chốt chuỗi đại diện + tuple đầy đủ"** và yêu cầu tiếp tục. Trạng thái chờ trong phần Phase 0 là lịch sử đề xuất; hai câu hỏi nay đã đóng ở questions-impl.md, contract giữ nguyên.
+
+- `Sample.pair_id: str` là min(pair_ids); `Sample.pair_ids: tuple[str,...]` giữ đầy đủ alias. Không dùng ID đại diện để thay kiểm tra toàn bộ quan hệ pair.
+- `apply_augmentation(image, boxes, *, partition, seed, recipe_id="aug_v1")` trả `(np.ndarray uint8 HWC, tuple[Box,...], meta dict JSON được)`. Áp đúng recipe được duyệt; thứ tự RNG k rồi flip; không tự áp augment vào eval/prepare_input. Recipe khai báo và khóa trong preprocessing.yaml.
+- NumPy **2.4.3** đã cài và chạy thật với Python **3.14.7**, Pillow **12.1.1**, PyYAML **6.0.3**, setuptools **80.10.2** trong `.venv` riêng của worktree impl. Thêm NumPy cho tile/map/NMS/augmentation; pyproject khai báo dependency để API editable install đầy đủ. Không sửa Step 1 manifest adapter.
+- Đã chạy check_loaders lần đầu: PASS, errors=[]; các kiểm chứng bổ sung đang thực hiện ở Phase 2.
+
+### Đã triển khai và lựa chọn cụ thể
+
+- Sample/Box là frozen dataclass; boxes/xyxy/pair_ids chuyển thành tuple để không giữ list mutable của caller. Loader lấy thứ tự lexical sample_id từ adapter, kiểm membership với holdout, không decode khi khởi tạo/len/duyệt metadata. Sai metadata không được biến thành good hoặc bỏ mẫu im lặng.
+- YoloTrainSet lấy toàn bộ train; AdTrainSet lọc good train rồi tính kế hoạch từ kích thước metadata; EvalSet mỗi canonical một lần. Alias development_selection trả cùng Sample.partition=`fusion` và cùng thứ tự.
+- Test gate nằm ở Sample.load_image và đường đọc path canonical của preprocessing (kiểm manifest + holdout trước Image.open); allow_test=False mặc định. Hỗ trợ allow_test=True theo contract nhưng không bật cờ đó trên dataset thật trong phiên này. `check_loaders` chỉ đọc metadata test, ghi `metadata_only=true`, shape/dtype/min/max/hash=null, batch_size=0 và access_blocked=true.
+- RGB conversion giữ nội dung màu, bỏ alpha, nhân L/LA thành ba kênh; không sửa input. Normalize trả float32/meta, từ chối float input để chặn áp hai lần. Letterbox dùng scale chung, bilinear, pad114; phép nghịch clip bbox vào ảnh gốc. AD resize dùng bilinear, meta có scale_xy vì ảnh không vuông có hai tỷ lệ khác nhau.
+- TileManager: size256/stride224, pad phải/dưới; reflect mặc định, replicate dùng edge, constant dùng **0**. NumPy reflect trên chiều dài 1 giữ giá trị duy nhất; đã kiểm 1×1, 1×513 và 513×1. Kế hoạch sử dụng integer ceil, không làm tròn số tile xuống hoặc dồn tile cuối về origin khác.
+- Feather mỗi trục giảm tuyến tính từ vùng tâm ra rìa overlap; với overlap32, độ dốc dùng `1/(32−1)`, endpoints 0/1. Trọng số vùng giữa được chặn ở 1; rìa canvas không có tile láng giềng không bị taper về 0. Ghép 2D bằng tích trọng số x/y và chia tổng trọng số từng pixel, accumulate float64 rồi trả float32. Vì vậy map hằng/trường tuyến tính chung được giữ, pixel có một tile nhận đúng giá trị đó; map của các tile khác nhau chuyển tuyến tính qua overlap, không có bước nhảy tại hai đầu overlap. Cắt padding khi ghi vùng H×W; mọi mẫu số phải dương.
+- `boxes_to_global` cộng origin, clip vào ảnh, bỏ box rỗng sau clip; giữ score ở float64 để không mất độ chính xác khi dịch box. NMS class-agnostic, tie giữ thứ tự đầu vào, chỉ loại khi IoU > threshold. Hàm/module global_nms và method TileManager.global_nms dùng cùng implementation.
+- Hash config = SHA-256 JSON chuẩn hóa (defaults, key order, kiểu tham số đã kiểm); PreparedInput.sha256 = SHA-256(header JSON chứa dtype/shape/meta + byte NUL + pixels C-contiguous). Hash không chứa path hoặc timestamp. Mọi meta preprocessing có version/hash/color_order/normalized. API helper `preview_input` gọi đúng `prepare_input`; scripts chỉ parse args, kiểm output và ghi JSON. `check_loaders` cũng nằm trong API, script không tự viết logic chuẩn bị ảnh.
+- Augmentation là API riêng, áp vào ảnh/box đầy đủ trước tiling nếu caller chọn dùng; không tự augment trong prepare_input hoặc loader/eval. Train-only và recipe được khóa; thay danh sách rotation/p=0.5/photometric phải thành recipe đã duyệt khác, không âm thầm đổi aug_v1.
+
+Các commit triển khai:
+
+- `2335efe`: Phase 0, ghi câu hỏi trước code.
+- `3d8f660`: dependency NumPy và TileManager/stitch/NMS.
+- `e9b0b2a`: preprocessing có version/hash, config và CLI preview dùng chung API.
+- `eca8ee1`: Sample/loader, bảo toàn pair aliases và test gate, CLI check_loaders.
+- `66abef3`: augmentation đã được duyệt và ghi hai câu trả lời của người dùng.
 
 ## Phase 2
 
-Chưa chạy loader/preview hoặc kiểm tính chất TileManager; chưa tuyên bố hoàn thành.
+### Lệnh và kết quả chạy thật
+
+Đã chạy ở worktree `D:\FPTU\KLTN\PCB_Lab_impl`, CPU/Python 3.14.7:
+
+```powershell
+uv --cache-dir .cache/uv pip install --python .venv/Scripts/python.exe -r requirements/step2.txt
+uv --cache-dir .cache/uv pip install --python .venv/Scripts/python.exe --no-build-isolation --no-deps -e .
+$env:DATASET_ROOT = 'D:\FPTU\KLTN\DatasetVer4_Public'
+$env:PATH = (Join-Path (Get-Location) '.venv\Scripts') + ';' + $env:PATH
+python scripts/check_loaders.py --dataset-root $env:DATASET_ROOT --out reports/loader_check.json
+python scripts/check_loaders.py --dataset-root $env:DATASET_ROOT --out reports/repeat/loader_check.json
+Get-FileHash reports/loader_check.json,reports/repeat/loader_check.json -Algorithm SHA256
+python reports/verification/step2_self_check.py
+python -B -m compileall -q src scripts
+uv --cache-dir .cache/uv pip check --python .venv/Scripts/python.exe
+```
+
+- Hai lượt check_loaders đều **PASS**, CLI exit **0**, `errors=[]`; JSON giống hệt từng byte.
+- SHA-256 loader_check.json: `d76a04afc71586a7607709534a5ea8122bc031baad39efcf0dcc7acb5ad346e6`.
+- preprocessing_hash: `69e65565a2402077b41380b2d742ec989d939bf2cf6f3c7dbd80182fe177f770`; version prep_v1.
+- compileall và dependency check đều PASS. Không có FAIL chưa giải quyết; các ValueError/PermissionError được chủ ý kích hoạt là kết quả mong đợi trong kiểm tra đầu vào sai/quyền truy cập.
+
+| Loader | n_samples từ manifest | Batch pixel đã đọc | Shape | dtype; min/max |
+| --- | ---: | ---: | --- | --- |
+| YoloTrainSet | 1792 | 2 ảnh | [2,640,640,3] | uint8; 0/255 |
+| AdTrainSet | 895 good train | 2 ảnh → 18 tile | [18,256,256,3] | uint8; 0/255 |
+| EvalSet calibration | 460 | 2 ảnh | [2,640,640,3] | uint8; 0/255 |
+| EvalSet fusion | 306 | 2 ảnh | [2,640,640,3] | uint8; 0/255 |
+| EvalSet test | 440 | **0**, chỉ metadata/gate | null | null |
+
+Mọi batch pixel đều RGB, normalized=false. AdTrainSet tính **tiles_per_image=9**, **num_tiles=8055** từ plan và số good; tất cả tile giữ train/good của Sample nguồn. Iter_tiles cho pixel đúng bằng prepare_input ad_tile. development_selection và fusion có cùng mẫu/thứ tự. Không hard-code các số dataset vào implementation.
+
+### Tính chất toán học và kiểm tra hình học
+
+Script tự kiểm chứng ở `reports/verification/step2_self_check.py` (ignored, không thuộc tests của VERIFIER) đã chạy thành công **12 nhóm kiểm tra**; kết quả text được lưu tại `reports/step2_self_check.json`.
+
+| H×W | Số tile tính được | Sai số max của hàm tuyến tính |
+| --- | ---: | ---: |
+| 640×640 | 9 | 0 |
+| 317×509 | 6 | 0 |
+| 257×289 | 4 | 0 |
+| 91×103 | 1 | 0 |
+| 1×1 | 1 | 0 |
+| 1×513 | 3 | 0 |
+| 513×1 | 3 | 0 |
+| 777×1003 | 20 | 0 |
+
+- Trên cả tám kích thước và ba pad mode: vùng không pad bằng nguyên pixel gốc; stitch từng kênh tái tạo chính xác ảnh; map hằng 3.25 giữ nguyên; map `0.013*x + 0.027*y + 0.3` theo tọa độ toàn ảnh tái tạo đúng float32; pixel chỉ được phủ bởi một tile giữ đúng giá trị tile đó; mọi biên có coverage và kết quả hữu hạn.
+- Map tile có giá trị hằng khác nhau ở bốn góc, ảnh 480×480: so với công thức crossfade tuyến tính độc lập hai chiều, sai số max **1.1536382871213391e-7**; hai đầu overlap không có bước nhảy. Kiểm thêm stride128/192/256 giữ map hằng và không chia 0; mặc định contract vẫn stride224/overlap32.
+- Box local→global→local trên tám kích thước: sai số **0**, score giữ nguyên, input không bị sửa. Box nằm hoàn toàn trong pad hoặc rỗng sau clip bị loại. NMS giữ hai box có IoU đúng 0.45, loại khi threshold0.449, tie score ổn định; mảng rỗng giữ shape [0,5].
+- Letterbox round-trip trên tám kích thước: sai số max **1.1368683772161603e-13 px**, nhỏ hơn yêu cầu ≤1 px. 640×640 giữ scale1/pad0. Upsample bilinear float32 2×2→317×509 nằm trong range [0,1], không overshoot.
+- L/LA/RGB/RGBA qua NumPy và PIL cho cùng RGB; kênh màu không đảo. Normalize float32 đặt normalized=true, gọi lại và std0 bị từ chối. Hash config không đổi khi chỉ đảo thứ tự khóa, đổi khi thay pad114→115.
+- Aug_v1 với 64 seed đã bao phủ đủ tám phép đối xứng; bbox khớp chính xác vùng pixel đánh dấu, multiset pixel và diện tích giữ nguyên, input không đổi, cùng seed trả cùng ảnh/box/meta. Calibration/fusion/development_selection/test đều bị từ chối.
+- Patch Image.open thành hàm lỗi khi tạo/len/duyệt metadata loader: không có decode. Test Sample và test canonical path đều bị chặn trước Image.open. Test allow_test=True chỉ kiểm bằng ảnh **tự sinh** ngoài dataset, không mở ảnh test thật.
+
+### API và CLI preview
+
+Đã gọi prep_preview.py cho ba ảnh train `deeppcb_00041000_defect`, `deeppcb_00041000_good`, `deeppcb_00041001_defect` ở cả yolo/ad_tile/ad_resize (9 lệnh CLI). Mỗi kết quả so với prepare_input gọi trực tiếp bằng Sample và bằng ndarray: **meta, shape và SHA-256 khớp**. Chín digest cụ thể nằm trong `reports/step2_self_check.json`.
+
+Lệnh mẫu đã chạy (tương tự cho hai ảnh và hai mode còn lại):
+
+```powershell
+python scripts/prep_preview.py --image "$env:DATASET_ROOT\benchmarks\deeppcb\images\deeppcb_00041000_defect.png" --mode yolo --out-json reports/verification/deeppcb_00041000_defect_yolo.json
+python scripts/prep_preview.py --image "$env:DATASET_ROOT\benchmarks\deeppcb\images\deeppcb_00041000_defect.png" --mode ad_tile --out-json reports/verification/deeppcb_00041000_defect_ad_tile.json
+python scripts/prep_preview.py --image "$env:DATASET_ROOT\benchmarks\deeppcb\images\deeppcb_00041000_defect.png" --mode ad_resize --out-json reports/verification/deeppcb_00041000_defect_ad_resize.json
+```
+
+Đã kiểm thêm ảnh tự sinh 317×509 ở ba mode: API/CLI có cùng hash/meta; box nghịch letterbox dùng meta JSON từ CLI bằng đúng box dùng meta API. CLI chỉ ghi metadata/hash, không xuất ảnh. Spy trong kiểm chứng không cho phép mở bất kỳ đường dẫn ảnh test thật nào; các subprocess preview chỉ nhận ba đường dẫn train nêu trên và ảnh tự sinh.
+
+### Đã làm / chưa làm / rủi ro / câu hỏi mở
+
+- **Đã làm:** toàn bộ phạm vi code Step 2 được giao; recipe và pair_id đã được người dùng duyệt; chạy dataset thật, hai lần loader check, kiểm toán hình học và API/CLI. Không cần sửa code Step 1.
+- **Chưa làm theo phạm vi:** train/inference model, pooling score của model, threshold/benchmark/UI/Gate0; không tuyên bố reflect/augmentation tốt nhất về metric. Kiểm thử độc lập Step 2 của VERIFIER chưa nhận kết quả; khi được báo sẽ đọc `git show step2/tests:docs/handoff/step2-verify.md` và xử lý trên branch impl.
+- **Giới hạn:** reflect/constant/replicate có thể tạo dấu hiệu biên nhân tạo; padding không được xem là vùng PCB thật khi stitch/clip. Các tile cùng ảnh tương quan, 8055 tile không phải 8055 ảnh độc lập. Augmentation đổi phân phối hướng dù bảo toàn pixel; lợi ích cần ablation model.
+- Canonical conversion không thể suy ra một ndarray bên ngoài có thứ tự BGR; contract yêu cầu caller dùng RGB. Float input bị từ chối thay vì tự đoán thang giá trị/normalized. LA/RGBA bỏ alpha đã ghi rõ; không áp EXIF để tránh tự đổi tọa độ nhãn.
+- Dữ liệu ngoài canonical có số tile/ảnh không đều sẽ bị AdTrainSet từ chối để bảo toàn công thức num_tiles của contract. Iterator lazy, không materialize toàn bộ 8055 tile cùng lúc.
+- Preprocessing giữ uint8 và chỉ normalize khi gọi rõ ràng; không có dataset inference test. Gate test bảo vệ API đọc Sample/path canonical; caller đã tự đưa ndarray thì phải tự bảo đảm provenance của ndarray đó.
+- **Câu hỏi chặn còn mở:** không có; Q1/Q2 đã có câu trả lời trong questions-impl.md. Không sửa file contract (SHA-256 kiểm lại bằng ban đầu), PLAN/DECISIONS/TRIAGE/tests hoặc branch khác; không merge.
+- Commit chỉ chứa code/config/requirements và báo cáo text. Fixture/ảnh tự sinh/preview JSON thử trong reports/verification và output repeat được ignore; không stage dataset, ảnh, key/token. Dừng bàn giao để người dùng và VERIFIER review.
