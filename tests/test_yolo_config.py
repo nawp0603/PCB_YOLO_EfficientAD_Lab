@@ -7,11 +7,21 @@ from helpers.step3_spec import (approved_test_config, assert_error_name, assert_
                                reverse_keys, write_config)
 
 
+def _forbid_model_creation(monkeypatch):
+    # B evidence: ignored nested typos reached real train. Reject before model creation.
+    import importlib
+    module = importlib.import_module("pcb_lab.models.yolo.train")
+    def forbidden(*args, **kwargs):
+        pytest.fail("Trainer reached model creation instead of raising ConfigError")
+    monkeypatch.setattr(module, "YOLO", forbidden)
+
+
 @pytest.mark.parametrize("key", ["lr0", "batch", "workers", "augment"])
 @pytest.mark.parametrize("smoke", [False, True])
 def test_trainer_rejects_each_null(synthetic_dataset_root, tmp_path, monkeypatch, key, smoke):
     # Protect contract config/train.py invariant 3: explicit null never falls back to YOLO defaults.
     from pcb_lab.models.yolo.train import train_yolo
+    _forbid_model_creation(monkeypatch)
     config = approved_test_config()
     config["train"][key] = None
     path = write_config(tmp_path / "config", config)
@@ -24,6 +34,7 @@ def test_trainer_rejects_each_null(synthetic_dataset_root, tmp_path, monkeypatch
 def test_trainer_rejects_unknown_keys(synthetic_dataset_root, tmp_path, monkeypatch, section):
     # Protect contract config: typo/extra keys fail, including nested train/infer selection.
     from pcb_lab.models.yolo.train import train_yolo
+    _forbid_model_creation(monkeypatch)
     config = approved_test_config()
     target = config if section is None else config[section]
     target["unapproved_typo_123"] = 1

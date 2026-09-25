@@ -82,7 +82,9 @@ def step3_cpu_dependencies(tmp_path, monkeypatch):
     if missing:
         pytest.skip("smoke dependencies missing: " + ", ".join(missing))
     # Keep library import-time settings in the test's own directory.
-    monkeypatch.setenv("YOLO_CONFIG_DIR", str(tmp_path / "ultralytics-settings"))
+    settings = tmp_path / "ultralytics-settings"
+    settings.mkdir()
+    monkeypatch.setenv("YOLO_CONFIG_DIR", str(settings))
     import torch
     import ultralytics
     return torch, ultralytics

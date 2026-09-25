@@ -108,8 +108,9 @@ def test_check_loaders_deterministic(real_dataset_root, tmp_path):
         pytest.skip("impl chưa merge (check_loaders.py chưa có)")
     out1 = tmp_path / "r1" / "loader_check.json"
     out2 = tmp_path / "r2" / "loader_check.json"
-    env = dict(sys.environ)
-    env["PYTHONPATH"] = str(REPO_ROOT / "src") + os_pathsep() + env.get("PYTHONPATH", "")
+    import os
+    env = dict(os.environ)  # B evidence: same invalid sys.environ call as preprocessing CLI test.
+    env["PYTHONPATH"] = str(REPO_ROOT / "src") + os.pathsep + env.get("PYTHONPATH", "")
     for out in (out1, out2):
         proc = subprocess.run(
             [sys.executable, str(script), "--dataset-root", str(real_dataset_root),

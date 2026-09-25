@@ -38,12 +38,13 @@ def test_one_epoch_cpu_train_reload_and_no_official_artifact(
         manifests = list((out / "runs/smoke").rglob("run_manifest.json"))
         assert len(manifests) == 1
         run = read_json(manifests[0])
-        assert_run_schema(run)
         assert run["smoke"] is True and run["epochs_run"] == 1
         assert str(run["device"]).lower() == "cpu"
         assert 0 < run["partitions_used"]["train"] < 1792
         assert run["args_used"]["epochs"] == 1 and run["args_used"]["workers"] == 0
-        assert run["args_used"]["pretrained"] is False
+        # Ultralytics setup_model initializes YAML without weights even when default pretrained=True.
+        assert str(run["args_used"]["model"]).endswith(".yaml")
+        assert run["pretrained"]["sha256"] is None
         for kind in ("best", "last"):
             matches = list(manifests[0].parent.rglob(f"{kind}.pt"))
             assert matches and all(sha256(path) == run["checkpoints"][f"{kind}_sha256"] for path in matches)
@@ -85,6 +86,8 @@ def test_one_epoch_cpu_train_reload_and_no_official_artifact(
         np.testing.assert_allclose(actual[:, 4], expected[:, 4], atol=1e-3, rtol=0)
         np.testing.assert_array_equal(actual[:, 5], expected[:, 5])
         assert not (out / "artifacts").exists()
+        # Keep reload evidence available even when provenance/schema assertions fail.
+        assert_run_schema(run)
     finally:
         # Includes source annotation caches; source test images remain stat-only throughout.
         assert dataset_snapshot(real_dataset_root) == before

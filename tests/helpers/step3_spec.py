@@ -233,6 +233,19 @@ def detection_record(det):
             "xyxy_original": [float(v) for v in field(det, "xyxy_original")]}
 
 
+def fake_checkpoint_loader(monkeypatch, class_names=None):
+    """B correction: from_artifact loads YOLO before constructing UltralyticsEngine.
+
+    Replace only deserialization of synthetic bytes; retain real hash/class/smoke guards.
+    Source evidence: adapter.py:119-138. The constructor signature was not fixed in A.
+    """
+    from types import SimpleNamespace
+    import ultralytics
+    names = list(CLASSES if class_names is None else class_names)
+    model = SimpleNamespace(names=dict(enumerate(names)))
+    monkeypatch.setattr(ultralytics, "YOLO", lambda *args, **kwargs: SimpleNamespace(model=model, names=model.names))
+
+
 def resolve_recorded_path(value, anchor):
     """Contract does not fix relative-path anchor; require one unambiguous existing file."""
     value, anchor = Path(value), Path(anchor).resolve()
@@ -257,8 +270,8 @@ def assert_prediction_row(row, sample, meta, run):
     assert row["timing_ms"] is None and isinstance(row["detections"], list)
     if row["error_reason"] is not None:
         assert isinstance(row["error_reason"], str) and row["error_reason"].strip()
-        # Failed inference cannot masquerade as a valid GOOD / zero score.
-        assert row["yolo_image_score"] is None
+        # Contract requires an explicit error, but does not prescribe the failed score's type.
+        assert row.get("final_status") != "GOOD"
         return
     scores = []
     for det in row["detections"]:
@@ -318,6 +331,29 @@ def make_fake_artifact(directory, dataset_root):
     return directory
 
 
+def assert_boxes_close_unordered(actual, expected, tolerance=0.01):
+    """Match class/geometry bijectively; rounding must not change a lexicographic pairing.
+
+    B evidence: deeppcb_12100121_defect has two class-0 boxes at x1=261.
+    Six-decimal labels give x1=260.99968 and 261.00032, reversing their sorted order.
+    """
+    assert len(actual) == len(expected)
+    candidates = [[j for j, (gt_cls, gt_box) in enumerate(expected)
+                   if cls == gt_cls and max(abs(a - b) for a, b in zip(box, gt_box)) <= tolerance]
+                  for cls, box in actual]
+    assigned = {}
+    def match(index, seen):
+        for target in candidates[index]:
+            if target in seen:
+                continue
+            seen.add(target)
+            if target not in assigned or match(assigned[target], seen):
+                assigned[target] = index
+                return True
+        return False
+    assert all(match(index, set()) for index in range(len(actual))), (actual, expected)
+
+
 def assert_view(root, out, view):
     """Verify by image bytes, never assume generated image basenames equal sample_id."""
     import yaml
@@ -329,8 +365,10 @@ def assert_view(root, out, view):
     assert {"path", "train", "val", "names"} <= data.keys() and "test" not in data
     names = data["names"]
     if isinstance(names, dict):
-        assert set(names) == set(range(6))
-        names = [names[key] for key in range(6)]
+        # B correction: YAML string keys "0".."5" and integer keys encode the same class order.
+        indexed = {int(key): value for key, value in names.items()}
+        assert len(indexed) == len(names) == 6 and set(indexed) == set(range(6))
+        names = [indexed[key] for key in range(6)]
     assert names == class_order(root) == CLASSES
     base = Path(data["path"])
     if not base.is_absolute():
@@ -375,15 +413,16 @@ def assert_view(root, out, view):
                 actual.append((cls, ((cx - w / 2) * sample.width, (cy - h / 2) * sample.height,
                                      (cx + w / 2) * sample.width, (cy + h / 2) * sample.height)))
                 counts[CLASSES[cls]] += 1
-            for (cls, box), (gt_cls, gt_box) in zip(sorted(actual), expected):
-                assert cls == gt_cls
-                assert max(abs(a - b) for a, b in zip(box, gt_box)) <= 0.01
+            assert_boxes_close_unordered(actual, expected, tolerance=0.01)
         assert len(set(partition_hashes)) == len(samples)
         hashes.update(partition_hashes)
         good = sum(not sample.is_defect for sample in samples)
         assert field(view, "counts")[partition] == {
             "images": len(samples), "good": good, "defect": len(samples) - good}
-        assert field(view, "box_counts")[partition] == {name: counts[name] for name in CLASSES}
+        reported = field(view, "box_counts")[partition]
+        # B correction: contract does not require explicitly storing zero-count classes.
+        assert set(reported) <= set(CLASSES)
+        assert {name: reported.get(name, 0) for name in CLASSES} == {name: counts[name] for name in CLASSES}
     forbidden = {row["sha256"] for row in all_rows if row["split"] in ("fusion", "test")}
     assert hashes.isdisjoint(forbidden)
     assert_sha(field(view, "view_signature"))

@@ -6,7 +6,7 @@ import json
 import pytest
 
 from helpers.step3_spec import (FakeEngine, assert_prediction_row, dataset_snapshot,
-                               make_fake_artifact, read_json)
+                               fake_checkpoint_loader, make_fake_artifact, read_json)
 
 
 @pytest.mark.parametrize("partitions", [("test",), ("train",), ("calibration", "test"),
@@ -42,6 +42,7 @@ def test_extract_complete_deterministic_and_preserves_errors(synthetic_dataset_r
             raise RuntimeError("VERIFIER_ENGINE_FAILURE")
     # Boundary confidence is exactly representable; no float32 ambiguity at conf_floor.
     engine = FakeEngine([[20, 30, 50, 60, 0.75, 2]], check=check)
+    fake_checkpoint_loader(monkeypatch)
     monkeypatch.setattr(adapter, "UltralyticsEngine", lambda *args, **kwargs: engine)
     meta, run = read_json(artifact / "artifact.json"), read_json(artifact / "run_manifest.json")
     before = dataset_snapshot(synthetic_dataset_root)
@@ -82,6 +83,7 @@ def test_extract_keeps_successful_empty_prediction(synthetic_dataset_root, tmp_p
     from pcb_lab.models.yolo.extract import extract_predictions
     monkeypatch.setenv("DATASET_ROOT", str(synthetic_dataset_root))
     artifact = make_fake_artifact(tmp_path / "artifact", synthetic_dataset_root)
+    fake_checkpoint_loader(monkeypatch)
     monkeypatch.setattr(adapter, "UltralyticsEngine", lambda *args, **kwargs: FakeEngine())
     out = tmp_path / "out"
     extract_predictions(artifact, synthetic_dataset_root, partitions=("calibration",), out_dir=out)

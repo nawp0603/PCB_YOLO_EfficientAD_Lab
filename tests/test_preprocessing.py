@@ -236,7 +236,8 @@ def test_prep_preview_cli_matches_api(tmp_path):
     img = tmp_path / "g.png"
     _make_png(img, _gray())
     out_json = tmp_path / "preview.json"
-    env = dict(sys.environ)
+    import os
+    env = dict(os.environ)  # B correction: sys.environ is not a Python API.
     env["PYTHONPATH"] = str(REPO_ROOT / "src") + os.pathsep + env.get("PYTHONPATH", "")
     proc = subprocess.run(
         [sys.executable, str(script), "--image", str(img),

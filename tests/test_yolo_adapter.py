@@ -3,7 +3,8 @@
 import pytest
 
 from helpers.step3_spec import (CLASSES, FakeEngine, assert_error_name, detection_record,
-                               detector_meta, make_fake_artifact, read_json, sha256, write_json)
+                               detector_meta, fake_checkpoint_loader, make_fake_artifact,
+                               read_json, sha256, write_json)
 
 
 def test_engine_receives_rgb_and_describe_retains_provenance():
@@ -59,8 +60,9 @@ def test_adapter_sort_ties_and_image_score_are_order_independent():
     assert records == [detection_record(det) for det in second]
     keys = [(-det["confidence"], det["class_id"], tuple(det["xyxy_original"])) for det in records]
     assert keys == sorted(keys) and len(records) == len(rows)
-    assert adapter.image_score(first) == pytest.approx(0.95)
-    assert adapter.image_score([]) == 0.0
+    # B correction: contract leaves placement open; implementation exposes this on the detector.
+    assert detector.image_score(first) == pytest.approx(0.95)
+    assert detector.image_score([]) == 0.0
 
 
 @pytest.fixture
@@ -100,18 +102,19 @@ def test_from_artifact_smoke_requires_explicit_opt_in(fake_artifact, monkeypatch
     write_json(run_path, run)
     meta["run_manifest"]["sha256"] = sha256(run_path)
     write_json(path, meta)
+    fake_checkpoint_loader(monkeypatch)
     monkeypatch.setattr(adapter, "UltralyticsEngine", lambda *args, **kwargs: FakeEngine())
     assert_error_name("SmokeArtifactError", lambda: adapter.YoloDetector.from_artifact(fake_artifact))
     assert adapter.YoloDetector.from_artifact(fake_artifact, allow_smoke=True) is not None
 
 
 def test_from_artifact_rejects_model_class_order(fake_artifact, monkeypatch):
-    # Protect contract ClassOrderError: artifact metadata stays correct; the ENGINE order changes.
+    # Protect contract ClassOrderError: artifact metadata stays correct; CHECKPOINT model.names changes.
     from pcb_lab.models.yolo import adapter
+    fake_checkpoint_loader(monkeypatch)
     monkeypatch.setattr(adapter, "UltralyticsEngine", lambda *args, **kwargs: FakeEngine())
     assert adapter.YoloDetector.from_artifact(fake_artifact) is not None
     wrong_order = CLASSES.copy()
     wrong_order[0], wrong_order[1] = wrong_order[1], wrong_order[0]
-    monkeypatch.setattr(adapter, "UltralyticsEngine",
-                        lambda *args, **kwargs: FakeEngine(class_names=wrong_order))
+    fake_checkpoint_loader(monkeypatch, wrong_order)
     assert_error_name("ClassOrderError", lambda: adapter.YoloDetector.from_artifact(fake_artifact))
