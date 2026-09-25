@@ -160,8 +160,7 @@ class YoloDetector:
                 confidence=float(conf),
                 xyxy_original=(float(x1), float(y1), float(x2), float(y2)),
             ))
-        detections.sort(key=lambda d: (-d.confidence, d.class_id,
-                                      d.xyxy_original[0], d.xyxy_original[1]))
+        detections.sort(key=lambda d: (-d.confidence, d.class_id, *d.xyxy_original))
         return detections
 
     def load(self) -> "YoloDetector":
