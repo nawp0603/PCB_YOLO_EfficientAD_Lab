@@ -284,8 +284,10 @@ def assert_prediction_row(row, sample, meta, run):
         assert 0 <= x1 < x2 <= sample.width and 0 <= y1 < y2 <= sample.height
         scores.append(det["confidence"])
     assert row["yolo_image_score"] == max(scores, default=0.0)
-    keys = [(-det["confidence"], det["class_id"], tuple(det["xyxy_original"])) for det in row["detections"]]
-    assert keys == sorted(keys)
+    # JSONL rounds scores to six decimals, so equal serialized scores do not
+    # imply equal original scores. C replay proved four such ties in B01 fusion.
+    # Exact class/coordinate tie-breaking remains covered on raw adapter output.
+    assert scores == sorted(scores, reverse=True)
 
 
 def make_fake_artifact(directory, dataset_root):

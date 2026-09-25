@@ -37,3 +37,18 @@ Các điểm trên đã đóng; không cần thêm phê duyệt để viết tes
 Trong snapshot dataset, ảnh test (và ảnh ngoài danh sách manifest cho phép) chỉ lấy stat;
 không mở byte để hash, không decode. Các file còn lại so SHA-256 + mtime + size, đồng thời
 kiểm kê mọi đường dẫn/cache mới. Đây là cách giữ lệnh cấm mở ảnh test trong WORKFLOW khi kiểm dataset chỉ đọc.
+
+## Giai đoạn C — bằng chứng cần bổ sung để đóng Step 3 (2026-09-25)
+
+Đã hoàn tất các phép kiểm độc lập có thể chạy; kết quả chi tiết ở `step3-verify.md` phần C.
+Không tự sửa hợp đồng hoặc dữ liệu artifact để chấp nhận null.
+
+- Cả hai run không có git_commit/git_dirty hoặc hash source bundle ràng buộc với run. Cần
+  xác định gói mã nguồn thực tế đã chạy, mã băm của nó và cơ chế provenance được điều phối duyệt;
+  không thể lấy HEAD hiện tại làm commit lịch sử chỉ vì checkpoint checksum đúng.
+- Cần bản gốc data.yaml và train.log của Colab; gói hiện tại chỉ có args.yaml/env/results.csv,
+  manifest, checkpoint và các plot. Nếu không còn bản gốc phải ghi rõ giới hạn xác minh lịch sử test.
+- Cần thống nhất validation 640×640 với inference 640×640 trước khi tái xuất report/preds.
+  `val(rect=True)` hiện tạo tensor 672×672; nguyên nhân AP pin_hole B01 lệch đã được tái lập.
+- Null pr_conf/n_gt_boxes là lỗi lấy field, không phải không có số liệu: `nt_per_class` tồn tại;
+  số GT calibration đúng là `[234,160,339,277,269,265]`, tổng 1.544. Test metadata nghiêm ngặt giữ nguyên.

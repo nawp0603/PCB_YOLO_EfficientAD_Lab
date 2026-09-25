@@ -302,9 +302,216 @@ diff `src`, `configs`, `requirements`, `scripts`, `notebooks`, `docs/RUN_GPU.md`
 `step3/impl` rỗng. Chỉ commit tests và báo cáo này. Log/XML, JSON phép đo, checkpoint smoke
 và file settings do lần import đầu sinh ra được giữ dưới `.cache/step3-verifier-b`, không commit.
 
-## Giai đoạn C — chưa bắt đầu
+## Giai đoạn C — nghiệm thu artifact thật, 2026-09-25
 
-Chờ B PASS và người dùng báo B01/B02 seed42 train xong. Chạy artifact lần lượt; bổ sung nghiệm thu
-git provenance/args/data/log, reload thuần, đối chiếu 5 ảnh, AP50 độc lập 101 điểm với ngưỡng 0.02,
-recipe/nguồn pretrained/tài nguyên/model card. Các test artifacts A là nền kiểm tra, chưa đủ thay C.
-PASS artifact chỉ nghĩa là đủ điều kiện dùng Bước 4–6, không khẳng định chất lượng mô hình.
+**B01: FAIL. B02: FAIL. Chưa đóng Step 3 theo hợp đồng hiện hành.** Cả hai model nạp và suy luận
+được; kết luận FAIL nói về điều kiện bàn giao/provenance/nhất quán đánh giá, không kết luận model kém.
+Người điều phối yêu cầu kiểm C sau khi tải artifact GPU về. Lúc bắt đầu, branch `step3/tests`
+đã ở merge commit `33c538d`, có sửa `d453536`; verifier không tự merge thêm.
+Báo cáo B trước đó vẫn là FAIL, chưa có lần nghiệm thu toàn bộ B thành PASS.
+
+### C.1. Phạm vi, môi trường và nguyên tắc kiểm
+
+- Cwd `D:/FPTU/KLTN/PCB_Lab_verify3`; lần lượt hai thư mục
+  `artifacts/yolo/B01_yolo11n/seed42` và `artifacts/yolo/B02_yolo11s/seed42`.
+- Dùng venv CPU riêng của B: Python 3.14.7, torch 2.14.0+cpu, Ultralytics 8.4.161,
+  pytest 9.1.1. Metadata môi trường train ghi Python 3.13.15 / torch 2.14.0+cu130 / CUDA 13.0.
+- Dataset chỉ đọc. **Test có 440 ảnh (220 good/220 defect), không phải 460**;
+  460 là calibration. Chỉ dùng metadata test, không mở/hash pixel/decode/suy luận trên ảnh test.
+- Không sửa artifact, run, source impl, contract hay PLAN. Giữ nguyên các kiểm schema provenance
+  và số liệu null; lời giải thích “zip không có .git” không khôi phục được chứng cứ nguồn mã/dirty.
+- Thêm phép kiểm độc lập để lỗi schema sớm không che mất kết quả hash, reload, GT, AP và partition.
+  `tests/helpers/step3_ap.py` chỉ dùng stdlib; không gọi metric của pcb_lab/Ultralytics.
+  `step3_pure_reload.py` chạy trong subprocess và assert **không import pcb_lab**.
+
+### C.2. Lệnh và kết quả thật
+
+```powershell
+$base = 'D:/FPTU/KLTN/PCB_YOLO_EfficientAD_Lab/.cache/step3-verifier-b'
+$py = "$base/.venv/Scripts/python.exe"
+$env:PYTHONPATH = ''
+$env:PYTHONDONTWRITEBYTECODE = '1'
+$env:YOLO_OFFLINE = 'true'
+$env:YOLO_CONFIG_DIR = "$base/settings"
+$env:MPLCONFIGDIR = "$base/mpl"
+$env:DATASET_ROOT = 'D:/FPTU/KLTN/DatasetVer4_Public'
+# Chạy lần lượt với B01_yolo11n và B02_yolo11s:
+$env:STEP3_ARTIFACT_DIR = 'D:/FPTU/KLTN/PCB_Lab_verify3/artifacts/yolo/B01_yolo11n/seed42'
+& $py -m pytest tests/test_yolo_artifacts.py -v --tb=short -p no:cacheprovider --basetemp=.cache/step3-verifier-c/B01_yolo11n-original-tmp --junitxml=.cache/step3-verifier-c/B01_yolo11n-original.xml
+& $py .cache/step3-verifier-c/audit_metadata.py
+& $py .cache/step3-verifier-c/probe_rounding.py
+& $py .cache/step3-verifier-c/investigate_validation.py
+# Lượt cuối B01, gồm kiểm regression raw adapter và oracle AP:
+& $py -m pytest tests/test_yolo_artifacts.py tests/test_yolo_ap_oracle.py tests/test_yolo_adapter.py tests/test_yolo_adversarial.py::test_all_four_coordinates_break_adapter_sort_ties -v --tb=short -o junit_family=xunit1 -p no:cacheprovider --basetemp=.cache/step3-verifier-c/B01-final-tmp --junitxml=.cache/step3-verifier-c/B01-final.xml
+$env:STEP3_ARTIFACT_DIR = 'D:/FPTU/KLTN/PCB_Lab_verify3/artifacts/yolo/B02_yolo11s/seed42'
+& $py -m pytest tests/test_yolo_artifacts.py -v --tb=short -o junit_family=xunit1 -p no:cacheprovider --basetemp=.cache/step3-verifier-c/B02-expanded-tmp --junitxml=.cache/step3-verifier-c/B02-expanded.xml
+& $py -m pytest tests/test_yolo_artifacts.py::test_real_artifact_prediction_rows -q --tb=short -p no:cacheprovider --basetemp=.cache/step3-verifier-c/B02-preds-final-tmp --junitxml=.cache/step3-verifier-c/B02-preds-final.xml
+```
+
+Các script chẩn đoán, stdout/stderr, XML và JSON kết quả nằm trong `.cache/step3-verifier-c/`,
+không commit log/checkpoint. Các lệnh thật redirect stdout/stderr vào file log cùng tên lượt.
+Settings/font offline đã được cấp sẵn từ B; pure reload và pytest chặn socket Python.
+
+| Lượt | Kết quả |
+|---|---|
+| B01, nguyên ba test A | **3 failed**, 1.03 s: provenance null, calibration null, serialized tie |
+| B02, nguyên ba test A | **2 failed, 1 passed**, 1.04 s: hai lỗi metadata |
+| B01, mở rộng + oracle AP ban đầu | **4 failed, 6 passed**, 30.07 s; thêm cảnh báo AP pin_hole |
+| B01, lượt cuối sau chứng minh/sửa phép kiểm serialized tie | **3 failed, 19 passed**, 40.32 s; riêng chín test artifact là **3 failed, 6 passed** |
+| B02, mở rộng chín test artifact | **2 failed, 7 passed**, 35.16 s |
+| B02, kiểm lại prediction rows sau sửa helper chung | **1 passed**, 1.29 s |
+
+Không ghép các lượt thành một lần full-suite chưa chạy. Các failure cuối giữ nguyên để người
+triển khai xử lý: provenance/schema cho cả hai, AP50 pin_hole của B01.
+
+### C.3. Checksum, định dạng checkpoint và reload
+
+Đã tính SHA-256 độc lập, so **file artifact = file runs/weights = artifact.json = run_manifest.json**
+cho cả best và last, đồng thời hash run_manifest bằng giá trị artifact trỏ tới. Tất cả khớp:
+
+| Model / file | SHA-256 |
+|---|---|
+| B01 best.pt | `c0cfe917a685a9d20014d4ece0c0d012f2a8a4d53c100190d7961a3d5cd21b05` |
+| B01 last.pt | `4de28ac1fbb70c3243c33e97aec0f2fb3b99f09784cd257338ade41c4dfbbfad` |
+| B01 run_manifest.json | `8ab6fcd1d304d0cdedb13977b8726985733e9bc2de2134a3e8d94d77bb6c1532` |
+| B02 best.pt | `aa079248bd566b3adf8863e3b43dde93d3392307a3ef17107e4c126bf410936c` |
+| B02 last.pt | `1f1ce96cf729af3f998bf6f9d4b47a5b94782088b8569ccf1627f6ea656d5850` |
+| B02 run_manifest.json | `4d83dd6aa812bee5a11bc2f6b639117e557e6ebce157b45f1494ddd4de60498d` |
+
+- Cả bốn file có cấu trúc ZIP PyTorch hợp lệ, CRC không lỗi, có data.pkl và nạp bằng YOLO thuần
+  thành `DetectionModel`. Class order của **best và last** đều khớp đủ sáu lớp canonical.
+- `YoloDetector.from_artifact` nạp được cả B01/B02. Trên năm ảnh calibration mỗi model,
+  sai khác lớn nhất adapter RGB vs pure YOLO predict(path): **0.0 px và 0.0 confidence**.
+  Năm ID: `12000001_defect`, `12000001_good`, `12000017_defect`, `12000017_good`,
+  `12000038_defect` (đều có tiền tố `deeppcb_`).
+- Checkpoint đã strip: epoch=-1, optimizer không còn, kể cả last.pt. Các file hợp lệ cho inference;
+  không có đủ optimizer/epoch để khẳng định resume đầy đủ trạng thái train từ last.pt.
+
+### C.4. Số liệu calibration, GT và AP50 độc lập
+
+JSON báo đúng các tỷ lệ người điều phối cung cấp (làm tròn phần trăm):
+
+| Model | mAP50 | mAP50-95 | Precision | Recall |
+|---|---:|---:|---:|---:|
+| B01 | 92.39% | 71.59% | 92.60% | 86.03% |
+| B02 | 93.79% | 73.59% | 90.68% | 90.64% |
+
+Đếm GT bằng **raw manifest stdlib, ManifestDataset và dòng nhãn calibration** đều khớp:
+
+| Lớp theo thứ tự canonical | GT calibration | B01 AP50 JSON | B01 AP50 độc lập | B02 AP50 JSON | B02 AP50 độc lập |
+|---|---:|---:|---:|---:|---:|
+| open_circuit | 234 | 0.979363 | 0.965442 | 0.992473 | 0.995199 |
+| short | 160 | 0.900008 | 0.909293 | 0.932247 | 0.937645 |
+| mouse_bite | 339 | 0.958904 | 0.960742 | 0.968162 | 0.963937 |
+| spur | 277 | 0.936668 | 0.946402 | 0.968878 | 0.967058 |
+| spurious_copper | 269 | 0.971372 | 0.956544 | 0.947012 | 0.927298 |
+| pin_hole | 265 | 0.797107 | **0.818733** | 0.818908 | 0.829348 |
+| Tổng GT / macro AP | **1.544** | **0.923904** | **0.926193** | **0.937947** | **0.936748** |
+
+Oracle riêng: sort confidence giảm dần, ghép một-một same-class trong từng ảnh bằng IoU≥0.5,
+envelope precision, trung bình 101 mức recall từ 0 đến 1. Có control giải tích cho perfect/empty,
+duplicate và box nhầm ảnh; không gọi evaluator implementation. Giữ thứ tự JSONL trong tie đã làm tròn.
+Ngưỡng **0.02** không đổi: B01 pin_hole lệch **+0.021625856**; B02 mọi lớp và overall nằm trong ngưỡng
+(spurious_copper sát ngưỡng: -0.019713816). Đây là kiểm độ nhất quán, không phải ngưỡng chất lượng.
+
+**Đã điều tra B01 thay vì nới ngưỡng:**
+
+1. Kiểm riêng quy ước AP của bản thư viện: `utils/metrics.py:762–793` dùng nội suy tuyến tính
+   101 điểm + trapezoid với precision cuối bằng 0, khác trung bình step-envelope 101 điểm.
+   Cài cách tích phân đó độc lập trong helper cho pin_hole **0.821679246**, vẫn lệch **+0.024571763**;
+   đổi quy ước tích phân không giải thích hết chênh lệch.
+2. Nguồn Ultralytics `engine/model.py:631` đặt `val(rect=True)` mặc định;
+   `data/build.py:311` đặt pad=0.5 cho validation; `data/base.py:425` làm batch shape thành **672×672**.
+   Trong khi adapter/predict trên ảnh canonical dùng **640×640**. Runner `_validate` không khóa rect.
+3. Dựng view kiểm tra mới dưới `.cache/` bằng copy (không coi đó là data.yaml gốc đã thất lạc),
+   chạy lại toàn bộ 460 calibration B01 trên CPU, giữ conf=.001, IoU=.7, max_det=300:
+
+| Chẩn đoán | Shape thực đo | mAP50 | AP50 pin_hole | pr_conf F1-optimal |
+|---|---|---:|---:|---:|
+| val rect=True | 672×672 | **0.9239040327276649** | **0.7971074825051101** | 0.6616616616616616 |
+| val rect=False | 640×640 | **0.9341408318893346** | **0.8182132012674659** | 0.4964964964964965 |
+
+Rect=True tái lập **đúng toàn bộ sáu AP50 trong JSON**; riêng thay rect làm pin_hole tăng
+**0.021105719**. Đây là bằng chứng thực nghiệm cho khác biệt preprocessing giữa validation và
+prediction; không phải lý do hợp thức hóa cùng một infer metadata cho hai đường khác nhau.
+Hai đường đều dùng cùng checkpoint, GT, conf_floor/NMS; RGB adapter/path đã khớp.
+GT của validator là `[234,160,339,277,269,265]`; snapshot dataset trước/sau chẩn đoán không đổi.
+
+**Metadata null không phải giới hạn không thể lấy số liệu của Ultralytics:**
+runner `train.py:517` lấy vector F1 (`metrics.box.f1`) làm pr_conf rồi `_safe` trả null;
+`train.py:529` tìm `metrics.box.gt_nb`, trong khi API bản cài có `DetMetrics.nt_per_class`
+(`utils/metrics.py:1176`). Chỉ số confidence có thể lấy ở cực đại đường F1 đã smooth
+(`metrics.py:885`). Không tự điền các số chẩn đoán vào artifact; cần tái xuất report nhất quán.
+
+### C.5. Predictions, tie và partition
+
+| Model / split | Dòng | Detection | Max box/ảnh | Confidence nhỏ nhất | Dòng lỗi |
+|---|---:|---:|---:|---:|---:|
+| B01 calibration | 460 | 2.976 | 54 | 0.001000 | 0 |
+| B01 fusion | 306 | 5.438 | 74 | 0.001002 | 0 |
+| B02 calibration | 460 | 2.615 | 52 | 0.001008 | 0 |
+| B02 fusion | 306 | 2.865 | 61 | 0.001002 | 0 |
+
+Mỗi ảnh đúng một dòng, sample_id sorted/không trùng, provenance từng dòng khớp metadata,
+đủ bốn trường bbox, tọa độ hợp lệ, confidence≥conf_floor, timing_ms=null, image_score=max confidence.
+Không có dòng error bị giấu. Max thấp hơn 300 nên không thấy dấu hiệu max_det cắt cụt.
+Intersection sample_id, image SHA-256 và source_group với metadata **440 test đều bằng 0**.
+
+B01 có bốn cặp fusion cùng confidence sau làm tròn nhưng secondary order không tăng. Replay
+bốn ảnh qua adapter xác nhận raw confidence giảm đúng; ví dụ `deeppcb_50600040_defect`:
+**0.017011236399412155 > 0.017010806128382683**, cả hai thành **0.017011** khi ghi JSONL;
+box replay khác tọa độ đã làm tròn dưới 0.005 px. Do đó sửa oracle JSONL chỉ yêu cầu score
+không tăng; không suy ra raw tie từ số đã lượng tử hóa. Test adapter raw vẫn so đủ class/x1/y1/x2/y2
+và đã chạy PASS. Không sửa hoặc sắp xếp lại prediction artifact.
+
+Tính lại view_signature độc lập từ metadata train+calibration và nhãn sáu chữ số/LF của Colab:
+`d4e75ccc65d3e3665ce5cd6fbe03c4788f5b9b69daba60ae515b31f2b69d6bd1`, khớp cả hai manifest.
+`partitions_used` chỉ ghi train=1792, val=calibration; args không có đường test.
+Các bằng chứng này nhất quán với không trộn test. **Không thể khẳng định tuyệt đối lịch sử Colab
+chưa từng đọc test** khi thiếu source provenance, data.yaml gốc và train.log.
+
+### C.6. Recipe, tài nguyên và phát hiện còn chặn bàn giao
+
+Diff hai args.yaml chỉ khác `model`, `data`, `project`, `save_dir`; ba mục sau là đường chứa model_id.
+Sau chuẩn hóa identity path, recipe giống nhau; cả hai batch=16, AdamW, lr0=.001, imgsz=640,
+seed=42, patience=20, deterministic=true. Hai hash pretrained có ghi, nhưng file pretrained không
+có trong gói và nguồn chỉ là `ultralytics-assets(github)`, thiếu URL/release cụ thể để xác minh nguồn.
+
+| Trường | B01 | B02 |
+|---|---|---|
+| epochs_run trong manifest | 100 | 100 |
+| Số epoch thực trong results.csv | **33** | **43** |
+| Epoch có fitness tốt nhất theo CSV (đếm từ 1; fitness bản cài=mAP50-95) | **13** | **23** |
+| Thời gian tích lũy dòng CSV cuối | **1260.46 s** | **1695.29 s** |
+| train_time_s / best_epoch trong manifest | null / null | null / null |
+| VRAM ghi nhận / method | 2160.8 MiB / torch.cuda.max_memory_allocated | 3858.7 MiB / cùng method |
+| RAM ghi nhận | 3596.1 MiB | 3670.9 MiB |
+
+CSV time là bằng chứng thời gian tích lũy train, không tự gọi là wall time end-to-end.
+RAM method ghi “peak RSS” nhưng code B đã chỉ ra đo RSS một thời điểm; chưa chứng minh peak thật.
+Model card có mục đích/dữ liệu/cấu hình/calibration/giới hạn N=2/không test, không khẳng định model khác,
+nhưng version và config_hash vẫn `n/a`.
+
+| ID / mức | Vị trí | Bằng chứng và việc cần xử lý |
+|---|---|---|
+| C-C01 **Critical** | Cả hai artifact.json/run_manifest.json | created_by_git_commit, git_commit, git_dirty đều null. Không xác minh được commit trên step3/impl hay source sạch. Cần gói source bất biến/hash gắn với run và quyết định provenance theo hợp đồng; không điền commit hiện tại hồi tố. |
+| C-M01 **Major** | B01 calibration report; `train.py:_validate`; Ultralytics val defaults | AP pin_hole vượt 0.02; đã cô lập khác biệt validation 672×672 vs prediction 640×640. Khóa cùng preprocessing/infer rồi tái xuất calibration report/preds và kiểm AP lại, giữ nguyên ngưỡng. B02 có cùng rủi ro cấu hình dù AP nằm trong ngưỡng. |
+| C-M02 **Major** | Cả hai calibration_per_class.json | pr_conf và toàn bộ n_gt_boxes null do lấy sai field/API. GT thực 1.544 đã xác minh ba cách; cần report đúng API và đúng pipeline. |
+| C-M03 **Major** | Cả hai run_manifest.json/results.csv | epochs_run=100 trái CSV33/43; best_epoch/train_time_s thiếu. Ghi số đo/định nghĩa thật, phân biệt số epoch dự kiến/thực chạy và epoch 0/1-based. |
+| C-M04 **Major** | Gói bàn giao runs/data_refs/reports | Không có train.log, data.yaml gốc, report validation yêu cầu. Không audit được toàn bộ đầu vào/log của run gốc; bổ sung bản gốc hoặc khai báo không thể phục hồi. |
+| C-M05 **Major** | last.pt của cả hai | File nạp được nhưng epoch=-1, optimizer=None; không chứng minh checkpoint phục hồi đầy đủ optimizer/epoch theo PLAN. Giữ checkpoint resumable riêng nếu yêu cầu phục hồi trạng thái. |
+| C-m01 **Minor** | Hai model_card.md; pretrained.source | Version/config_hash n/a, nguồn pretrained thiếu release/URL; hoàn thiện từ bằng chứng có thật. |
+| C-m02 **Minor** | runs/yolo/*/seed42/weights/yolo26n.pt | Có checkpoint phụ ở cả hai run, phù hợp đường AMP helper đã nêu ở B. Thiếu log để xác nhận được cấp sẵn hay tải ngầm; không coi metadata hiện có là bằng chứng offline. |
+
+### C.7. Kết luận và điều kiện kiểm lại
+
+- **B01: FAIL** — runtime/checksum/predictions PASS; provenance/report chưa đủ và AP per-class
+  vượt ngưỡng do validation không cùng kích thước tensor với pipeline inference.
+- **B02: FAIL** — runtime/checksum/predictions và AP trong ngưỡng; vẫn thiếu provenance và
+  metadata/report bắt buộc, chưa đủ điều kiện đóng C theo hợp đồng.
+- Chưa đánh dấu Step 3 hoàn thành, chưa cấp PASS cho dùng chính thức ở Bước 4–6. Không cần suy
+  diễn phải train lại chỉ từ các lỗi này: trước hết phục hồi bằng chứng source/run và tái đánh giá/
+  xuất metadata nhất quán; Verifier sẽ quyết định phần nào cần kiểm/train lại từ bằng chứng đó.
+
+Chỉ commit test/helper và handoff. Các artifact người dùng tải về giữ nguyên và không stage;
+không tự merge. Diff WORKFLOW/contract so với main rỗng, source/config so với step3/impl rỗng.
