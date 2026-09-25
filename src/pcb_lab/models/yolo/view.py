@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -62,7 +63,7 @@ class YoloView:
         }
 
 
-def _write_labels_and_collect(out_dir: Path, samples, partition: str, limit):
+def _write_labels_and_collect(out_dir: Path, samples, partition: str, limit, link):
     """Write label files and hard-link/copy images; return counts + per-class box counts."""
     img_out = out_dir / "images" / partition
     lbl_out = out_dir / "labels" / partition
@@ -86,6 +87,7 @@ def _write_labels_and_collect(out_dir: Path, samples, partition: str, limit):
     box_counts: dict[str, int] = {}
     label_hashes: list[str] = []
     sample_lines: list[str] = []
+    link_modes: set[str] = set()
 
     for sample in selected:
         if sample.is_defect:
@@ -94,12 +96,21 @@ def _write_labels_and_collect(out_dir: Path, samples, partition: str, limit):
             counts["good"] += 1
         stem = Path(sample.image_path).stem
         img_target = img_out / f"{stem}{sample.image_path.suffix}"
-        if not img_target.exists():
+        # Replace the directory entry, never overwrite a previous hardlink's
+        # bytes: rebuilding with copy must detach the view from its source.
+        if img_target.exists() or img_target.is_symlink():
+            img_target.unlink()
+        if link == "copy":
+            shutil.copy2(sample.image_path, img_target)
+            link_modes.add("copy")
+        else:
             try:
                 os.link(sample.image_path, img_target)
             except OSError:
-                import shutil
-                shutil.copyfile(sample.image_path, img_target)
+                shutil.copy2(sample.image_path, img_target)
+                link_modes.add("copy")
+            else:
+                link_modes.add("hardlink")
         # Labels (empty file for good samples).
         lbl_path = lbl_out / f"{stem}.txt"
         lines: list[str] = []
@@ -116,7 +127,7 @@ def _write_labels_and_collect(out_dir: Path, samples, partition: str, limit):
         label_hashes.append(sha256_file(lbl_path))
         sample_lines.append(f"{sample.sample_id}\t{sample.sha256}\t{sha256_file(lbl_path)}")
 
-    return counts, box_counts, sample_lines, label_hashes
+    return counts, box_counts, sample_lines, label_hashes, link_modes
 
 
 def _compute_view_signature(sample_lines: list[str]) -> str:
@@ -151,22 +162,23 @@ def build_yolo_view(dataset_root, out_dir, partitions=("train", "calibration"),
     counts: dict = {}
     box_counts: dict = {}
     all_sample_lines: list[str] = []
+    link_modes: set[str] = set()
 
     for partition in partitions:
         samples = ManifestDataset(dataset_root, partition)
-        link_mode_used = link
-        try:
-            c, bc, lines, _ = _write_labels_and_collect(out_dir, samples, partition, limit)
-        except OSError as exc:
-            if link == "hardlink":
-                # Cross-device or link unsupported: fall back to copy, record mode.
-                link_mode_used = "copy"
-                c, bc, lines, _ = _write_labels_and_collect(out_dir, samples, partition, limit)
-            else:
-                raise
+        c, bc, lines, _, modes = _write_labels_and_collect(out_dir, samples, partition, limit, link)
+        link_modes.update(modes)
         counts[partition] = c
         box_counts[partition] = bc
         all_sample_lines.extend(lines)
+
+    # Keep link_mode truthful even if linking fails only for some images: make
+    # the complete selected view independent copies once any fallback occurs.
+    if len(link_modes) > 1:
+        for partition in partitions:
+            _write_labels_and_collect(out_dir, ManifestDataset(dataset_root, partition),
+                                      partition, limit, "copy")
+    link_mode_used = "copy" if "copy" in link_modes else link
 
     view_signature = _compute_view_signature(all_sample_lines)
 

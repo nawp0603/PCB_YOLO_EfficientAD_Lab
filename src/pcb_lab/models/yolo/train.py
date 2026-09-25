@@ -12,6 +12,7 @@ import json
 import os
 import platform
 import shutil
+import subprocess
 import time
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -22,8 +23,10 @@ import torch
 import yaml
 
 from pcb_lab.data.manifest import (
+    artifact_path,
     dataset_path,
     load_dataset,
+    output_path,
     resolve_dataset_root,
     sha256_file,
 )
@@ -102,6 +105,8 @@ def _geometric_augment(img_bgr, bboxes_norm_xywh, k, flip):
     """
     for _ in range(k):
         img_bgr = np.ascontiguousarray(np.rot90(img_bgr, k=1, axes=(0, 1)))
+    if flip:
+        img_bgr = np.ascontiguousarray(np.fliplr(img_bgr))
     boxes = []
     for (cx, cy, bw, bh) in (bboxes_norm_xywh if len(bboxes_norm_xywh) else np.empty((0, 4))):
         for _ in range(k):
@@ -298,6 +303,8 @@ def _download_pretrained(rel):
 
 def train_yolo(config_path, seed=42, out_root=".", device=None, smoke=False,
                resume=False, allow_download=False, amp=None):
+    dataset_root = resolve_dataset_root()
+    out_root = output_path(dataset_root, Path(out_root))
     os.environ.setdefault("ULTRALYTICS_NO_ANALYTICS", "1")
     config_path = Path(config_path)
     if not config_path.exists():
@@ -314,7 +321,6 @@ def train_yolo(config_path, seed=42, out_root=".", device=None, smoke=False,
     infer_cfg = dict(cfg["infer"])
     classes_ref = cfg.get("classes_ref", "benchmarks/deeppcb/configs/classes.json")
 
-    dataset_root = resolve_dataset_root()
     release = load_dataset(dataset_root).release
     dataset_release_sha = _release_files_sha(release)
 
@@ -326,10 +332,10 @@ def train_yolo(config_path, seed=42, out_root=".", device=None, smoke=False,
     else:
         if not pretrained_rel:
             raise ConfigError("pretrained must be set for a real run")
-        pretrained_path = Path(pretrained_rel)
+        pretrained_path = Path(pretrained_rel).resolve()
         if not pretrained_path.exists():
             if allow_download:
-                pretrained_path = _download_pretrained(pretrained_rel)
+                pretrained_path = _download_pretrained(pretrained_path).resolve()
             else:
                 raise ConfigError("Pretrained missing; pass allow_download=True to fetch")
         pretrained_sha = sha256_file(pretrained_path)
@@ -337,16 +343,15 @@ def train_yolo(config_path, seed=42, out_root=".", device=None, smoke=False,
 
     config_hash = _config_hash(cfg)
 
-    out_root = Path(out_root).resolve()
-    if smoke:
-        runs_base = out_root / "runs" / "smoke" / model_id / ("seed" + str(seed))
-    else:
-        runs_base = out_root / "runs" / "yolo" / model_id / ("seed" + str(seed))
+    # Resolve every derived output directory before the first mkdir. This also
+    # rejects model_id escapes and existing junctions outside the output root.
+    runs_base = artifact_path(out_root, f"runs/{'smoke' if smoke else 'yolo'}/{model_id}/seed{seed}")
+    view_out = artifact_path(out_root, f"data_refs/{'smoke_view' if smoke else 'yolo_view'}/{model_id}")
+    artifact_dir = None if smoke else artifact_path(out_root, f"artifacts/yolo/{model_id}/seed{seed}")
     if runs_base.exists() and any(runs_base.iterdir()) and not resume:
         raise ConfigError("Run dir already exists; refuse overwrite (use resume=True)")
     runs_base.mkdir(parents=True, exist_ok=True)
 
-    view_out = out_root / "data_refs" / ("smoke_view" if smoke else "yolo_view") / model_id
     limit = {"good": 8, "defect": 8} if smoke else None
     view = build_yolo_view(dataset_root, view_out, partitions=("train", "calibration"),
                            link="hardlink", limit=limit)
@@ -459,10 +464,8 @@ def train_yolo(config_path, seed=42, out_root=".", device=None, smoke=False,
         "cuda_available": torch.cuda.is_available(), "device": (device or "cpu"),
     }, indent=2), encoding="utf-8")
 
-    artifact_dir = None
     artifact = None
     if not smoke:
-        artifact_dir = out_root / "artifacts" / "yolo" / model_id / ("seed" + str(seed))
         artifact_dir.mkdir(parents=True, exist_ok=True)
         for src in (best_pt, last_pt):
             if src.exists():

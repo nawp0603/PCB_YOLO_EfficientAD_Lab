@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from pcb_lab.data.manifest import resolve_dataset_root, load_dataset, sha256_file
+from pcb_lab.data.manifest import artifact_path, output_path, resolve_dataset_root, load_dataset, sha256_file
 from pcb_lab.data.samples import ManifestDataset
 from pcb_lab.models.yolo.adapter import YoloDetector
 
@@ -30,15 +30,16 @@ def extract_predictions(artifact_dir, dataset_root, partitions=("calibration", "
         if p not in ("calibration", "fusion"):
             raise PermissionError(f"extract_predictions only allows calibration/fusion, got {p!r}")
 
-    meta = _resolve_artifact_refs(artifact_dir)
     dataset_root = resolve_dataset_root(dataset_root if dataset_root is not None else None)
+    out_dir = output_path(dataset_root, Path(out_dir) if out_dir is not None else artifact_dir)
+    out_paths = {p: artifact_path(out_dir, f"preds_{p}.jsonl") for p in partitions}
+    meta = _resolve_artifact_refs(artifact_dir)
     names = load_dataset(dataset_root).names
 
     detector = YoloDetector.from_artifact(artifact_dir, allow_smoke=meta.get("smoke", False))
     desc = detector.describe()
     infer_params = desc["infer_params"]
 
-    out_dir = Path(out_dir) if out_dir else (artifact_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     summary = {"artifact_dir": str(artifact_dir), "partitions": {}, "errors": []}
@@ -47,7 +48,7 @@ def extract_predictions(artifact_dir, dataset_root, partitions=("calibration", "
 
     for partition in partitions:
         samples = ManifestDataset(dataset_root, partition)
-        out_path = out_dir / f"preds_{partition}.jsonl"
+        out_path = out_paths[partition]
         rows = []
         n_det = 0
         for sample in samples:
@@ -73,7 +74,7 @@ def extract_predictions(artifact_dir, dataset_root, partitions=("calibration", "
                 row["detections"] = [
                     {"class_id": d.class_id, "class_name": d.class_name,
                      "confidence": round(d.confidence, 6),
-                     "xyxy": [round(v, 2) for v in d.xyxy_original]}
+                     "xyxy_original": [round(v, 2) for v in d.xyxy_original]}
                     for d in dets
                 ]
                 row["yolo_image_score"] = round(detector.image_score(dets), 6)

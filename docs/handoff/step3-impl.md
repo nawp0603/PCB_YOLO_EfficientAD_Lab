@@ -227,3 +227,87 @@ python scripts/package_colab.py                 # -> exports/colab_bundle.zip
 ```
 
 Ghi chu: không commit file `.pt` hay `.zip` lón vao Git (`.gitignore` dã lo). `exports/colab_bundle.zip` cung nam trong ignore (không commit).
+
+## Sửa theo phản hồi Phase B — 2026-09-25
+
+### Phạm vi đã được chỉ định
+
+Người dùng yêu cầu thực hiện vai trò Implementer tại `PCB_Lab_impl3`, branch `step3/impl`,
+sửa các mục flip ảnh, pretrained path, output guards, copy/link_mode, tie-break, JSONL Detection
+và import subprocess. Base trước sửa: `b6465893ba3da7c4967c3487f6dc16b0d6941233`.
+Đã đọc WORKFLOW/contract và báo cáo Verifier tại `PCB_Lab_verify3/docs/handoff/step3-verify.md`
+(commit verifier `7ffff82`). Không có điểm mơ hồ chặn các sửa đổi được chỉ định.
+Phạm vi file: bốn module YOLO và handoff này; không sửa test hay hợp đồng, không merge branch.
+
+### Thay đổi
+
+- `train.py`: `_geometric_augment` lật ngang cả pixel BGR bằng `np.ascontiguousarray(np.fliplr(...))`
+  sau bước xoay, đồng bộ với bbox; `pretrained_path` được resolve absolute trước kiểm file/hash/chdir.
+- `train.py`: guard `output_path` ngay đầu hàm; resolve và kiểm các đường run/view/artifact bằng
+  `artifact_path` trước mkdir, chặn path escape và junction ra ngoài out_root. Import `subprocess`
+  để `_git_state` lấy commit/dirty thật.
+- `extract.py`: guard output trước đọc artifact/nạp model/mkdir, kể cả out_dir mặc định;
+  kiểm đường file JSONL đã resolve. Đổi khóa detection từ `xyxy` sang `xyxy_original`.
+- `view.py`: truyền `link` xuống helper, dùng `shutil.copy2` khi yêu cầu copy. Thay directory entry
+  cũ trước ghi để rebuild copy không giữ hardlink tới nguồn. Ghi mode thực; nếu chỉ một số ảnh
+  hardlink thất bại, chuyển toàn bộ ảnh được chọn sang copy để `link_mode="copy"` đúng với view.
+- `adapter.py`: sort theo `(-confidence, class_id, x1, y1, x2, y2)`.
+
+### Kiểm tra đã chạy
+
+Dùng Python 3.14.7, torch 2.14.0+cpu, Ultralytics 8.4.161, pytest 9.1.1 trong venv CPU
+đã cài đúng `requirements/step3.txt` ở `.cache/step3-verifier-b/.venv` của repo gốc.
+Chạy nguyên test Verifier, không sửa/copy vào branch impl. Runner tạm thêm `impl3/src` lên đầu
+sys.path, giữ `verify3/src` ở cuối để conftest không ưu tiên source cũ; assert và log xác nhận
+`pcb_lab.__file__` nằm trong `PCB_Lab_impl3/src`.
+
+```powershell
+# cwd D:/FPTU/KLTN/PCB_Lab_impl3
+$base = 'D:/FPTU/KLTN/PCB_YOLO_EfficientAD_Lab/.cache/step3-verifier-b'
+$py = "$base/.venv/Scripts/python.exe"
+$env:PYTHONPATH = ''
+$env:PYTHONDONTWRITEBYTECODE = '1'
+$env:YOLO_OFFLINE = 'true'
+$env:YOLO_CONFIG_DIR = "$base/settings"
+$env:MPLCONFIGDIR = "$base/mpl"
+$env:PATH = 'C:/Program Files/Git/cmd;' + $env:PATH
+$env:DATASET_ROOT = 'D:/FPTU/KLTN/DatasetVer4_Public'
+$env:STEP3_ARTIFACT_DIR = ''
+$tests = @(Get-ChildItem 'D:/FPTU/KLTN/PCB_Lab_verify3/tests/test_yolo_*.py' | ForEach-Object FullName)
+& $py .cache/step3-fixes/run_verifier.py @tests -m 'not dataset and not smoke' -q --tb=short -p no:cacheprovider --basetemp=D:/FPTU/KLTN/PCB_Lab_impl3/.cache/step3-fixes/fast-tmp --junitxml=.cache/step3-fixes/fast.xml
+& $py .cache/step3-fixes/probe_fixes.py
+& $py .cache/step3-fixes/run_verifier.py 'D:/FPTU/KLTN/PCB_Lab_verify3/tests/test_yolo_view.py::test_real_view_counts_boxes_isolation_and_read_only' 'D:/FPTU/KLTN/PCB_Lab_verify3/tests/test_yolo_smoke.py::test_one_epoch_cpu_train_reload_and_no_official_artifact' -q --tb=short -p no:cacheprovider --basetemp=D:/FPTU/KLTN/PCB_Lab_impl3/.cache/step3-fixes/real-smoke-tmp --junitxml=.cache/step3-fixes/real-smoke.xml
+```
+
+Lệnh thực tế lưu stdout/stderr thành `fast.log`, `probes.log`, `real-smoke.log` dưới
+`.cache/step3-fixes`. Settings/font Arial đã có từ lượt Verifier B; socket guard của test giữ nguyên.
+Việc dùng tài nguyên đã cấp sẵn không chứng minh lỗi network B-C04 đã được sửa.
+
+| Phép kiểm | Kết quả thật |
+|---|---|
+| Nhóm test nhanh Step 3 | **54 passed, 9 failed, 2 skipped, 3 deselected**, 41.05 s |
+| Tám node nhắm đúng lỗi sửa: flip, relative pretrained, train/extract output guard, copy inode, EXDEV fallback, tie-break, Detection schema | **Cả tám PASS** trong lượt nhanh trên |
+| Probe thêm | **PASS**: 8 tổ hợp xoay/lật ảnh có box và 8 tổ hợp ảnh không box; oracle lấy biên vùng pixel để so box; rebuild hardlink→copy không gọi os.link/không alias nguồn; fallback một ảnh chuyển cả view sang copy; guard sớm, path escape và Windows junction; snapshot dataset giả không đổi |
+| `_git_state` | **PASS**: commit bằng `git rev-parse HEAD`, `git_dirty=true` đúng với worktree đang sửa; không còn null |
+| Real view + smoke | **1 passed, 1 failed**, 43.14 s; real view PASS, smoke fail ở `best_epoch=null` |
+
+Real view đạt 1.792 train/460 calibration, box-count đúng plan, round-trip ≤0.01 px,
+hash tách fusion/test và snapshot dataset thật không đổi. Smoke thực sự train 1 epoch CPU trên
+16 ảnh train + 16 calibration, reload và so adapter RGB/path đạt ≤0.5 px / ≤1e-3 confidence,
+checkpoint hashes khớp manifest, không tạo artifact chính thức, dataset thật không đổi.
+Smoke ghi đúng `git_commit=b6465893ba3da7c4967c3487f6dc16b0d6941233`, `git_dirty=true`
+vì test chạy trước commit sửa. Schema đi qua kiểm git rồi fail ở `best_epoch` (vẫn null);
+`train_time_s` cũng vẫn null. Không ghi đè provenance smoke thành commit mới sau khi train.
+
+### Handoff cho Verifier
+
+Các sửa đổi được chỉ định đã qua kiểm cục bộ; **chưa phải Phase B PASS**. Các tuyên bố PASS
+ở phần Phase 2 lịch sử phía trên không thay thế báo cáo B của Verifier.
+Chín failure nhanh còn lại: run directory rỗng được chấp nhận; class thứ bảy; resume chưa nối
+trainer; ba nested config key chưa bị chặn; hai ca run_id extraction không khớp manifest;
+view rebuild giữ mẫu cũ khi giảm limit. Smoke còn lỗi metadata epoch/time; các mục khác
+trong báo cáo B ngoài phạm vi chỉ định, gồm mạng ngầm, vẫn cần xử lý trước train thật.
+
+Không hạ kỳ vọng test, không sửa test của Verifier; không train B01/B02 thật hay tự merge.
+Log/probe/checkpoint chỉ ở `.cache/`, không commit. Diff WORKFLOW/contract so với main rỗng;
+`git diff --check` sạch. Chờ Verifier kiểm chứng lại commit sửa này.
