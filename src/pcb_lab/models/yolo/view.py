@@ -123,7 +123,8 @@ def _write_labels_and_collect(out_dir: Path, samples, partition: str, limit, lin
             bh = (box.xyxy[3] - box.xyxy[1]) / h
             lines.append(f"{box.class_id} {cx:.6f} {cy:.6f} {bw:.6f} {bh:.6f}")
             box_counts[box.class_name] = box_counts.get(box.class_name, 0) + 1
-        lbl_path.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+        # Canonical LF bytes keep view_signature identical on Windows and Colab.
+        lbl_path.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8", newline="\n")
         label_hashes.append(sha256_file(lbl_path))
         sample_lines.append(f"{sample.sample_id}\t{sample.sha256}\t{sha256_file(lbl_path)}")
 
@@ -192,10 +193,10 @@ def build_yolo_view(dataset_root, out_dir, partitions=("train", "calibration"),
     # Explicit contract guarantee: no 'test' key.
     assert "test" not in yaml_data
     data_yaml.write_text(yaml.safe_dump(yaml_data, sort_keys=False, allow_unicode=True),
-                         encoding="utf-8")
+                         encoding="utf-8", newline="\n")
 
     # Persist a deterministic manifest of what was linked (for re-build idempotency checks).
     (out_dir / "view_manifest.txt").write_text(
-        "\n".join(sorted(all_sample_lines)) + "\n", encoding="utf-8")
+        "\n".join(sorted(all_sample_lines)) + "\n", encoding="utf-8", newline="\n")
 
     return YoloView(data_yaml, counts, box_counts, link_mode_used, view_signature)

@@ -13,6 +13,8 @@ downloads pretrained).
 from __future__ import annotations
 
 import argparse
+import json
+import subprocess
 import sys
 import zipfile
 from pathlib import Path
@@ -24,7 +26,7 @@ EXCLUDE_DIRS = {".venv", "venv", "runs", ".cache", ".git", "__pycache__",
                 "artifacts", "data_refs", "exports", "scratch", "node_modules"}
 # File suffixes/patterns to exclude.
 EXCLUDE_SUFFIXES = {".pt", ".zip", ".pth", ".onnx", ".engine", ".bin", ".ckpt"}
-EXCLUDE_NAMES = {"yolo_step3_artifacts.zip"}
+EXCLUDE_NAMES = {"yolo_step3_artifacts.zip", "bundle_provenance.json"}
 
 # Specific files to always include (relative to ROOT) even if rules above would drop them.
 INCLUDE_EXACT = {
@@ -92,9 +94,16 @@ def main() -> int:
         out.unlink()
 
     files = collect(ROOT)
+    provenance = {
+        "git_commit": subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
+        "git_dirty": bool(subprocess.check_output(
+            ["git", "status", "--porcelain"], cwd=ROOT, text=True).strip()),
+    }
     with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zf:
         for p in files:
             zf.write(p, p.relative_to(ROOT).as_posix())
+        zf.writestr("bundle_provenance.json", json.dumps(provenance, indent=2) + "\n")
 
     total = sum(f.stat().st_size for f in files)
     print(f"Bundle written: {out}")
