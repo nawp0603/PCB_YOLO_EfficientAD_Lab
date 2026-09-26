@@ -311,3 +311,101 @@ trong báo cáo B ngoài phạm vi chỉ định, gồm mạng ngầm, vẫn c�
 Không hạ kỳ vọng test, không sửa test của Verifier; không train B01/B02 thật hay tự merge.
 Log/probe/checkpoint chỉ ở `.cache/`, không commit. Diff WORKFLOW/contract so với main rỗng;
 `git diff --check` sạch. Chờ Verifier kiểm chứng lại commit sửa này.
+
+## Phase C metadata refresh (2026-09-27)
+
+Completed the requested local metadata correction for B01/B02 seed42 without
+training. The three requested real-artifact tests PASS for both models. This is
+not a claim that the entire extended Verifier suite is green; findings below
+remain visible for final review.
+
+| Model | epochs_run | best_epoch | train_time_s | refreshed mAP50 | pr_conf |
+|---|---:|---:|---:|---:|---:|
+| B01_yolo11n | 33 | 13 | 1260.5 | 0.9341408318893346 | 0.4964964964964965 |
+| B02_yolo11s | 43 | 23 | 1695.3 | 0.9408849607293804 | 0.5795795795795796 |
+
+Changes and evidence:
+
+- `_validate` explicitly uses `rect=False`, 640x640, the recorded inference
+  settings including `half=False`, and calibration only. Validation output stays
+  in its scratch view. `pr_conf` is the confidence coordinate at the maximum of
+  the smoothed mean F1 curve, matching Ultralytics 8.4.161 precision/recall.
+- Ground-truth counts come from manifest-backed view counts (fallback:
+  `metrics.nt_per_class`), not `metrics.box.nc` (number of classes). Counts:
+  open_circuit=234, short=160, mouse_bite=339, spur=277,
+  spurious_copper=269, pin_hole=265; total=1544 on 460 calibration images.
+- Training summaries are derived from actual `results.csv`, including for future
+  smoke runs. Missing/malformed evidence raises instead of inventing 100 epochs.
+  No training or smoke training was run during this refresh.
+- Source provenance is `7623c11d88e4502c879d6f0efa71aab4ae495839`.
+  The full SHA `7623c11a28a3a2e37f07e5223049b49fb7283726` in the request does not
+  exist locally. The allowed HEAD alternative was used after comparing all 61
+  files in the original `exports/colab_bundle.zip` against that commit. All match,
+  allowing recovery of `git_dirty=false` for the original training source.
+  Current metadata edits are documented separately; they are not represented as
+  a new training run. Future Colab bundles embed `bundle_provenance.json` and the
+  runner reads it when `.git` is unavailable.
+- `model_card.md` now records the original training versions (Ultralytics 8.4.161,
+  Torch 2.14.0+cu130) and actual config hashes. A separate validation context
+  records local CPU Torch 2.14.0+cpu / Python 3.14.7 and refresh parameters.
+- Canonical LF label files make the Windows view signature match the original
+  Colab signature `d4e75ccc65d3e3665ce5cd6fbe03c4788f5b9b69daba60ae515b31f2b69d6bd1`.
+  `.gitattributes` preserves LF for committed JSON manifests so Windows checkout
+  cannot invalidate recorded hashes.
+- Updated the eight requested metadata files and recomputed both manifest hashes:
+  B01 `0c94bb6ee08db432cf66d81c2dc57eee2f74b69ea1923e1d728522c5197a2e26`;
+  B02 `57139af843e514b6187b111261a64850a9775956c5a73fe9d2bd31541a0f5507`.
+- All 14 discovered checkpoint/prediction files retain their before/after SHA-256.
+  Dataset directory/file size and modification-time inventory is unchanged.
+  No test image was opened, decoded, or used for validation. Real-view verification
+  additionally passed the independent dataset snapshot check. Original metadata
+  backups remain under `scratch/metadata_refresh/before/`.
+
+Refresh command actually run from `D:/FPTU/KLTN/PCB_Lab_impl3`:
+
+```powershell
+$env:PATH = 'C:/Program Files/Git/cmd;' + $env:PATH
+& .venv/Scripts/python.exe -B scripts/refresh_yolo_metadata.py --source-commit 7623c11d88e4502c879d6f0efa71aab4ae495839 --bundle exports/colab_bundle.zip --device cpu --batch 16
+```
+
+The implementation environment lacks pytest. Tests reused the existing pytest
+9.1.1 installation in `PCB_YOLO_EfficientAD_Lab/.venv/Lib/site-packages` by appending
+that directory to `sys.path`, after keeping the implementation environment's
+Torch/Ultralytics ahead of it. The local helper
+`PCB_YOLO_EfficientAD_Lab/.cache/phase_c_refresh/run_checks.py` preimports the
+implementation's `pcb_lab.models.yolo.train` before collecting the unchanged tests
+from `PCB_Lab_verify3`. Its startup output confirms the implementation file path.
+All test invocations used `-q -p no:cacheprovider --tb=short`.
+
+| Actual verification | Result |
+|---|---|
+| `tests/test_yolo_metadata_refresh.py` | 6 passed |
+| Requested `test_real_artifact_manifest_schema_and_file_hashes`, `test_real_artifact_calibration_schema`, `test_real_artifact_prediction_rows` | All 3 PASS for each model |
+| Seven artifact/GT/AP/isolation checks, B01 | 6 passed, 1 failed, 2 deselected |
+| Same seven checks, B02 | 7 passed, 2 deselected |
+| Regression + Verifier view/config suites | 31 passed, 4 failed |
+| Original commit loaded in memory, rerun four failing view/config cases plus top-level unknown key control | Same 4 failed, 1 passed, 24 deselected |
+
+Extended findings (test expectations and prediction files were not changed):
+
+1. B01 `test_real_ap50_recomputed_with_101_points` flags `open_circuit`:
+   saved-prediction oracle AP50=0.9654415972399374 versus refreshed validation
+   AP50=0.9863670110986422, absolute delta=0.020925413858704833 (limit=0.02).
+   Re-evaluating the saved predictions with Ultralytics' own matcher and AP
+   integration gives 0.9700960132123367 for this class, reducing the difference
+   to 0.016270997886305483. Thus the independent step-envelope versus Ultralytics
+   trapezoid convention contributes to the warning; it does not explain the
+   entire prediction/validation difference. No unsupported hardware-only cause
+   is claimed. Refreshed B01 pin_hole AP50=0.8182132012674659 versus the independent
+   oracle 0.8187333386445058 (delta about 0.00052), resolving the original pin_hole
+   discrepancy. Verifier should review the remaining open_circuit warning.
+2. The four view/config failures predate this refresh: rebuilding a smaller view
+   leaves stale samples, and unknown nested keys under train/selection/infer are
+   not rejected. Reproduced with source from the original commit in memory;
+   target files and checkpoint bytes were not reverted or rewritten for that check.
+
+Machine-readable evidence: `reports/phase_c_metadata_refresh.json`,
+`reports/phase_c_B01_yolo11n.xml`, `reports/phase_c_B02_yolo11s.xml`, and
+`reports/phase_c_baseline_checks.xml`. Validation log stays local at
+`scratch/metadata_refresh.log`. Ready for the requested final Verifier review,
+with the extended findings explicitly retained.

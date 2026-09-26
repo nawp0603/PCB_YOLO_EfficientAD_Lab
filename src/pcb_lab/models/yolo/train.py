@@ -8,11 +8,13 @@ argument used plus peak memory.
 from __future__ import annotations
 
 import hashlib
+import csv
 import json
 import os
 import platform
 import shutil
 import subprocess
+import sys
 import time
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -231,6 +233,86 @@ class _PCBDetectionTrainer(DetectionTrainer):
         super().train()
 
 
+def _f1_optimal_conf(box):
+    """Confidence at the maximum of the mean F1 curve (Ultralytics F1-optimal).
+
+    ``metrics.box.f1`` is a per-class array at the optimum, not a scalar, so the
+    scalar ``pr_conf`` must come from ``px`` at argmax(smooth(mean(f1_curve))).
+    Mirrors ``ap_per_class`` (metrics.py): i = smooth(f1_curve.mean(0), 0.1).argmax().
+    Returns None when curves are unavailable.
+    """
+    try:
+        f1_curve = getattr(box, "f1_curve", None)
+        px = getattr(box, "px", None)
+        if f1_curve is None or px is None:
+            return None
+        f1_curve = np.asarray(f1_curve, dtype=np.float64)
+        px = np.asarray(px, dtype=np.float64)
+        if (f1_curve.ndim not in (1, 2) or px.ndim != 1
+                or f1_curve.size == 0 or px.size == 0
+                or not np.isfinite(f1_curve).all() or not np.isfinite(px).all()):
+            return None
+        mean_f1 = f1_curve.mean(axis=0) if f1_curve.ndim > 1 else f1_curve
+        if mean_f1.size != px.size:
+            return None
+        mean_f1 = _smooth(mean_f1, 0.1)
+        idx = int(np.argmax(mean_f1))
+        value = float(px[idx])
+        if not 0 <= value <= 1:
+            return None
+        return value
+    except (TypeError, ValueError, IndexError):
+        return None
+
+
+def _smooth(y, f=0.05):
+    """Box filter of fraction f (mirrors ultralytics.utils.metrics.smooth)."""
+    from ultralytics.utils.metrics import smooth
+    return smooth(np.asarray(y, dtype=np.float64), f)
+
+
+def _calibration_gt_counts(view):
+    """Ground-truth box counts per class from the calibration view (manifest)."""
+    try:
+        counts = (view.box_counts or {}).get("calibration", {})
+        return {str(k): int(v) for k, v in counts.items()}
+    except Exception:
+        return {}
+
+
+def _read_training_summary(runs_base, planned_epochs):
+    """Derive epochs_run/best_epoch/train_time_s/early_stopped from results.csv.
+
+    Best epoch = argmax of metrics/mAP50-95(B) (Ultralytics fitness in this
+    version is pure mAP50-95: Metric.fitness weights [0,0,0,1]). Missing or
+    malformed evidence raises instead of reporting planned epochs as observed.
+    """
+    try:
+        path = Path(runs_base) / "results.csv"
+        with path.open(encoding="utf-8-sig", newline="") as stream:
+            rows = [{k.strip(): v.strip() for k, v in row.items()}
+                    for row in csv.DictReader(stream)]
+        if not rows:
+            raise ValueError("empty results.csv")
+        epochs = [int(row["epoch"]) for row in rows]
+        fitness = [float(row["metrics/mAP50-95(B)"]) for row in rows]
+        elapsed = float(rows[-1]["time"])
+        if epochs != list(range(1, len(rows) + 1)):
+            raise ValueError("epoch history must be complete and contiguous from 1")
+        if not np.isfinite(fitness).all() or not np.isfinite(elapsed) or elapsed < 0:
+            raise ValueError("nonfinite or invalid training measurements")
+        # Ultralytics saves best.pt again on an equal best fitness.
+        best_index = max(range(len(rows)), key=lambda i: (fitness[i], epochs[i]))
+        return {
+            "epochs_run": len(rows),
+            "best_epoch": epochs[best_index],
+            "train_time_s": round(elapsed, 1),
+            "early_stopped": len(rows) < int(planned_epochs),
+        }
+    except (OSError, UnicodeError, ValueError, KeyError, TypeError, AttributeError) as exc:
+        raise ConfigError(f"Cannot derive training summary from {path}: {exc}") from exc
+
+
 def _unwrap_model_stride(model):
     from ultralytics.utils.torch_utils import unwrap_model
     return int(unwrap_model(model).stride.max())
@@ -270,12 +352,22 @@ class RunResult:
 
 
 def _git_state():
+    root = Path(__file__).resolve().parents[4]
     try:
-        commit = subprocess.check_output(["git", "rev-parse", "HEAD"], stderr=subprocess.DEVNULL).decode().strip()
-        dirty = subprocess.check_output(["git", "status", "--porcelain"], stderr=subprocess.DEVNULL).decode().strip() != ""
+        commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, stderr=subprocess.DEVNULL).decode().strip()
+        dirty = subprocess.check_output(["git", "status", "--porcelain"], cwd=root, stderr=subprocess.DEVNULL).decode().strip() != ""
         return commit, dirty
-    except Exception:
-        return None, None
+    except (OSError, subprocess.CalledProcessError):
+        pass
+    try:
+        provenance = json.loads((root / "bundle_provenance.json").read_text(encoding="utf-8"))
+        commit, dirty = provenance["git_commit"], provenance["git_dirty"]
+        if (isinstance(commit, str) and len(commit) == 40
+                and all(c in "0123456789abcdef" for c in commit) and type(dirty) is bool):
+            return commit, dirty
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    return None, None
 
 
 
@@ -423,6 +515,7 @@ def train_yolo(config_path, seed=42, out_root=".", device=None, smoke=False,
             peak["vram_mb"]["value"] = None
 
     commit, dirty = _git_state()
+    training_summary = _read_training_summary(runs_base, overrides["epochs"])
     run_manifest = {
         "schema_version": 1,
         "run_id": model_id + "-seed" + str(seed),
@@ -446,10 +539,10 @@ def train_yolo(config_path, seed=42, out_root=".", device=None, smoke=False,
         "pretrained": {"path": (str(pretrained_path) if pretrained_path else None),
                        "sha256": pretrained_sha, "source": pretrained_source},
         "args_used": overrides,
-        "epochs_run": (1 if smoke else train_cfg["epochs"]),
-        "best_epoch": None,
-        "early_stopped": (not smoke),
-        "train_time_s": None,
+        "epochs_run": training_summary["epochs_run"],
+        "best_epoch": training_summary["best_epoch"],
+        "early_stopped": training_summary["early_stopped"],
+        "train_time_s": training_summary["train_time_s"],
         "peak_vram_mb": peak["vram_mb"],
         "peak_ram_mb": peak["ram_mb"],
         "checkpoints": {"best_sha256": best_sha, "last_sha256": last_sha},
@@ -491,21 +584,26 @@ def train_yolo(config_path, seed=42, out_root=".", device=None, smoke=False,
         }
         (artifact_dir / "artifact.json").write_text(
             json.dumps(artifact, indent=2, ensure_ascii=False, sort_keys=True), encoding="utf-8")
-        _write_model_card(artifact_dir / "model_card.md", model_id, arch, cfg, view, val_metrics, per_class)
+        _write_model_card(artifact_dir / "model_card.md", model_id, arch, cfg, view, val_metrics, per_class,
+                          ultralytics_version=_ultra_pkg.__version__, torch_version=torch.__version__,
+                          config_hash=config_hash)
         _link_preds(out_root, artifact_dir, model_id, seed)
     return RunResult(runs_base, artifact_dir, run_manifest, artifact, smoke)
 
 
-def _validate(model_id, best_pt, view, infer_cfg, device):
+def _validate(model_id, best_pt, view, infer_cfg, device, *, save_dir=None, batch=16):
     from ultralytics import YOLO
     if not best_pt or not best_pt.exists():
         return {"note": "no best.pt"}, {}
     model = YOLO(str(best_pt))
+    save_dir = Path(save_dir) if save_dir is not None else view.data_yaml.parent / "validation" / model_id
     metrics = model.val(
         data=str(view.data_yaml), split="val",
         imgsz=infer_cfg["imgsz"], conf=infer_cfg["conf_floor"], iou=infer_cfg["iou"],
         max_det=infer_cfg["max_det"], agnostic_nms=infer_cfg["agnostic_nms"],
-        device=(device or "cpu"), verbose=False, plots=False,
+        device=(device or "cpu"), verbose=False, plots=False, rect=False,
+        half=infer_cfg.get("half", False), workers=0, batch=batch,
+        project=str(save_dir.parent), name=save_dir.name, exist_ok=True,
     )
     names = model.names
     overall = {
@@ -514,8 +612,9 @@ def _validate(model_id, best_pt, view, infer_cfg, device):
         "precision": _safe(metrics.box.mp),
         "recall": _safe(metrics.box.mr),
         "pr_definition": "Ultralytics F1-optimal confidence (not operating threshold)",
-        "pr_conf": _safe(metrics.box.f1),
+        "pr_conf": _f1_optimal_conf(metrics.box),
     }
+    gt_counts = _calibration_gt_counts(view)
     per_class = {}
     ap_class = getattr(metrics.box, "ap_class_index", None)
     if ap_class is not None:
@@ -525,11 +624,11 @@ def _validate(model_id, best_pt, view, infer_cfg, device):
         r = list(metrics.box.r)
         for i, cid in enumerate(ap_class):
             name = names[cid] if cid < len(names) else str(cid)
-            n_gt = None
-            if hasattr(metrics.box, "gt_nb"):
-                gt_nb = metrics.box.gt_nb
-                if cid < len(gt_nb):
-                    n_gt = int(gt_nb[cid])
+            n_gt = gt_counts.get(name)
+            if n_gt is None:
+                nt_per_class = getattr(metrics, "nt_per_class", None)
+                if nt_per_class is not None and cid < len(nt_per_class):
+                    n_gt = int(nt_per_class[cid])
             per_class[name] = {
                 "n_gt_boxes": n_gt,
                 "precision": _safe(p[i]) if i < len(p) else None,
@@ -550,7 +649,8 @@ def _safe(v):
     return None
 
 
-def _write_model_card(path, model_id, arch, cfg, view, overall, per_class):
+def _write_model_card(path, model_id, arch, cfg, view, overall, per_class,
+                      ultralytics_version=None, torch_version=None, config_hash=None):
     lines = []
     lines.append("Model card — " + model_id)
     lines.append("")
@@ -574,9 +674,12 @@ def _write_model_card(path, model_id, arch, cfg, view, overall, per_class):
                  ", max_det=" + str(cfg["infer"]["max_det"]) + ".")
     lines.append("")
     lines.append("Phien ban")
-    lines.append("ultralytics " + str(cfg.get("ultralytics_version", "n/a")) + ", torch " +
-                 str(cfg.get("torch_version", "n/a")) + ".")
-    lines.append("config_hash=" + str(cfg.get("config_hash", "n/a")) + ", view_signature=" + view.view_signature + ".")
+    ultra_v = ultralytics_version if ultralytics_version is not None else cfg.get("ultralytics_version", "n/a")
+    torch_v = torch_version if torch_version is not None else cfg.get("torch_version", "n/a")
+    cfg_hash = config_hash if config_hash is not None else cfg.get("config_hash", "n/a")
+    lines.append("ultralytics " + str(ultra_v) + ", torch " +
+                 str(torch_v) + ".")
+    lines.append("config_hash=" + str(cfg_hash) + ", view_signature=" + view.view_signature + ".")
     lines.append("")
     lines.append("So lieu calibration (F1-optimal confidence, KHONG phai nguong van hanh)")
     lines.append("mAP50=" + str(overall.get("map50")) + ", mAP50-95=" + str(overall.get("map50_95")) +
