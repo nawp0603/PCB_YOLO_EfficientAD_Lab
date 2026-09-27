@@ -69,15 +69,38 @@ train_efficientad(config_path, seed=42, out_root=".", device=None, smoke=False, 
 - Sao chép vào artifacts/efficientad/B03_efficientad_s/seed<seed>/: model.pt, artifact.json, model_card.md, calibration_stats.json.
 
 ### adapter.py
-EfficientAdDetector(engine, meta) và EfficientAdDetector.from_artifact(artifact_dir, allow_smoke=False):
-- infer_tiles(tiles_tensor) -> tile_maps_tensor [9, 256, 256]
-- predict(image_rgb_640x640) -> EfficientAdResult:
-  - anomaly_score: float (max của stitched heatmap)
-  - anomaly_map: ndarray [640, 640] float32 (đã stitch bằng linear blending)
-  - boxes: list[Detection] chứa `{xyxy, confidence, class_name: "anomaly_unclassified"}` trích xuất từ heatmap qua thuật toán khóa:
-    `Map -> threshold tau_pixel -> Morph Open(k=3) -> Connected Components -> Area > min_area -> Bounding Rect -> Global NMS (IoU=0.45)`
-- describe() -> dict (model_id, checkpoint_sha256, norm_stats, infer_params, input_color="rgb").
-- from_artifact: sha256 checkpoint khác artifact.json -> ArtifactMismatchError; artifact smoke khi allow_smoke=False -> SmokeArtifactError.
+- Engine (giao thức): `infer_tiles(tiles_uint8_nhwc: np.ndarray) -> np.ndarray`
+  Nhận mảng N tile RGB uint8 `[N, 256, 256, 3]` (canonical RGB uint8 HWC, N=9 đối với ảnh 640x640 qua TileManager).
+  Trả về mảng N tile anomaly map float32 `[N, 256, 256]`.
+  Test độc lập có thể tiêm engine giả (FakeEngine / MockEngine) chỉ cần hiện thực phương thức này để kiểm tra toàn bộ luồng số học, stitching, và heatmap->bbox mà không cần checkpoint thật.
+- EfficientAdEngine: Triển khai Engine bọc mô hình PyTorch đã load weights (Teacher, Student, Autoencoder).
+- Detection: `@dataclass(frozen=True) class Detection`: `class_id: int | None` (None cho AD), `class_name: str` ("anomaly_unclassified"), `confidence: float`, `xyxy_original: tuple[float, float, float, float]`.
+- EfficientAdResult: `@dataclass(frozen=True) class EfficientAdResult`: `anomaly_score: float`, `anomaly_map: np.ndarray` (float32 [H,W]), `boxes: list[Detection]`.
+- EfficientAdDetector(engine: Engine, meta: dict) và EfficientAdDetector.from_artifact(artifact_dir, allow_smoke=False):
+  - predict(image_rgb_640x640) -> EfficientAdResult:
+    1. Nhận ảnh RGB uint8 canonical [H, W, 3] (mặc định 640x640).
+    2. Cắt tile bằng `TileManager(tile_size=256, stride=224, pad_mode="reflect", nms_iou=0.45)`.
+    3. Gọi `engine.infer_tiles(tiles)` -> `tile_maps` [N, 256, 256] float32.
+    4. Tái tạo map toàn ảnh bằng `TileManager.stitch(tile_maps, specs, (H, W))` (linear blending).
+    5. `anomaly_score = float(np.max(stitched_heatmap))` (baseline image score).
+    6. Trích xuất bounding boxes từ heatmap theo thuật toán R8 đã khóa:
+       `Map -> binarize tại tau_pixel -> Morph Open(k=3) -> Connected Components -> Area > min_area -> Bounding Rect -> Global NMS (IoU=0.45)`.
+       Confidence của mỗi box là giá trị pixel anomaly score lớn nhất bên trong connected component đó.
+  - describe() -> dict (model_id, checkpoint_sha256, norm_stats, infer_params, input_color="rgb").
+  - from_artifact: sha256 checkpoint khác artifact.json -> ArtifactMismatchError; artifact smoke khi allow_smoke=False -> SmokeArtifactError.
+
+- normalization_stats (cấu trúc bắt buộc trong artifact.json và meta["normalization_stats"]):
+  ```json
+  {
+    "source_split": "calibration",
+    "n_good_images": 230,
+    "quantile_min": 0.0,
+    "quantile_max": 1.0,
+    "mean": 0.0,
+    "std": 1.0
+  }
+  ```
+  (Trong đó `quantile_min`, `quantile_max`, `mean`, `std` là các số thực float được tính trên tập calibration good; detector giả có thể gán giá trị mặc định ví dụ 0.0, 1.0).
 
 ### extract.py
 extract_efficientad_predictions(artifact_dir, dataset_root, partitions=("calibration","fusion"), out_dir=None) -> dict
