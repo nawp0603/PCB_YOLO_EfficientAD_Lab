@@ -1,0 +1,25 @@
+﻿{
+    "flowcharts":  1,
+    "content_nodes":  98,
+    "legend_nodes":  2,
+    "edges":  132,
+    "subgraphs":  10,
+    "ends":  10,
+    "inventory_items":  409,
+    "coverage_rows":  409,
+    "label_content_matched":  409,
+    "optional_nodes":  16,
+    "issues":  [
+
+               ],
+    "mermaid_parser_checked":  false,
+    "svg_png_exported":  false,
+    "export_failure":  "npx command not found",
+    "note":  "PowerShell structure/content checks are not a Mermaid syntax parser or visual render check",
+    "sha256":  {
+                   "PLAN_OVERVIEW.mmd":  "bc657b8d837278ff84788d76fcc1c0c329f963480a171862b3722c22c4479f4f",
+                   "INVENTORY.md":  "73ee973271e6899ff4050e62d5b48a9b33022e86fb0bafdce04da247794be5ba",
+                   "COVERAGE.md":  "ba3bc615edd2b3538e012344afc7e9d0e32dc4cee0b33060188ec4462e3f6a0b",
+                   "NOTES.md":  "fc63e8708317f6b6ec8e4b74e65d204f99a5513c5ad46922458a0614859aa1e5"
+               }
+}
